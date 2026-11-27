@@ -31,8 +31,10 @@
 //      probes of the D3D12 calls the wrap needs: the game queue's
 //      timestamp frequency, a test present queue, a fence, a command
 //      allocator/list, a test interpolation texture, GetBuffer and
-//      GetParent) so a failed wrap can be traced to the call that
-//      actually fails, without another build.
+//      GetParent, the swap chain's IDXGISwapChain3/4 support, a
+//      descriptor heap, copy/compute queues and a shared fence) so a
+//      failed wrap can be traced to the call that actually fails,
+//      without another build.
 //   4. fsr3_fg_prepare: dispatches the frame-generation prepare pass
 //      (ffxDispatchDescFrameGenerationPrepare) into the caller's
 //      command list, from depth + motion vectors, with the camera
@@ -303,9 +305,13 @@ bool bridgeFolder(wchar_t *out, size_t count) {
 // Probe the D3D12 calls the wrap needs, so a RUNTIME_ERROR from
 // AMD's DLL can be traced to the call that actually fails. Every
 // probe creates and immediately releases its object; a failure here
-// is the wrap's failure, not a new one. The prime suspects are the
-// game queue (the DLL needs its timestamp frequency for pacing) and
-// the DLL's own present queue (it creates one from the device).
+// is the wrap's failure, not a new one. The first round of probes
+// (queue timestamp, present queue, fence, allocator/list, texture,
+// GetBuffer, GetParent) all passed, so the failure is in something
+// they did not cover. The prime suspect now is the swap chain
+// itself: the DLL needs the current back-buffer index, which lives
+// on IDXGISwapChain3, and victory's swap chain may be a proxy that
+// only implements the base interface.
 struct WrapProbes {
     HRESULT queueTimestampHr = E_FAIL;
     UINT64 queueTimestampFreq = 0;
@@ -314,8 +320,18 @@ struct WrapProbes {
     HRESULT testAllocatorHr = E_FAIL;
     HRESULT testListHr = E_FAIL;
     HRESULT testTextureHr = E_FAIL;
+    HRESULT heapHr = E_FAIL;
+    HRESULT copyQueueHr = E_FAIL;
+    HRESULT computeQueueHr = E_FAIL;
+    HRESULT sharedFenceHr = E_FAIL;
     HRESULT getBufferHr = E_FAIL;
     HRESULT getParentHr = E_FAIL;
+    HRESULT sc3Hr = E_FAIL;
+    UINT backBufferIndex = 0xFFFFFFFF;
+    HRESULT sc4Hr = E_FAIL;
+    HRESULT fullscreenHr = E_FAIL;
+    BOOL fullscreen = FALSE;
+    HRESULT outputHr = E_FAIL;
 };
 
 WrapProbes probeWrap(ID3D12Device *device, ID3D12CommandQueue *gameQueue, IDXGISwapChain4 *swapchain) {
@@ -358,6 +374,30 @@ WrapProbes probeWrap(ID3D12Device *device, ID3D12CommandQueue *gameQueue, IDXGIS
         p.testTextureHr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &tex,
                                                           D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&resource));
         if (resource) resource->Release();
+        // A descriptor heap (the DLL needs one for its interpolation
+        // resources) and queues of the other types, in case it makes
+        // one of those instead of a direct queue.
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.NumDescriptors = 16;
+        ID3D12DescriptorHeap *descHeap = nullptr;
+        p.heapHr = device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&descHeap));
+        if (descHeap) descHeap->Release();
+        D3D12_COMMAND_QUEUE_DESC cqd{};
+        cqd.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+        ID3D12CommandQueue *copyQueue = nullptr;
+        p.copyQueueHr = device->CreateCommandQueue(&cqd, IID_PPV_ARGS(&copyQueue));
+        if (copyQueue) copyQueue->Release();
+        D3D12_COMMAND_QUEUE_DESC kqd{};
+        kqd.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        ID3D12CommandQueue *computeQueue = nullptr;
+        p.computeQueueHr = device->CreateCommandQueue(&kqd, IID_PPV_ARGS(&computeQueue));
+        if (computeQueue) computeQueue->Release();
+        // A shared fence, in case the DLL shares one between its own
+        // present queue and the game's.
+        ID3D12Fence *sharedFence = nullptr;
+        p.sharedFenceHr = device->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&sharedFence));
+        if (sharedFence) sharedFence->Release();
     }
     if (swapchain) {
         ID3D12Resource *back = nullptr;
@@ -366,6 +406,24 @@ WrapProbes probeWrap(ID3D12Device *device, ID3D12CommandQueue *gameQueue, IDXGIS
         IDXGIFactory *factory = nullptr;
         p.getParentHr = swapchain->GetParent(IID_PPV_ARGS(&factory));
         if (factory) factory->Release();
+        // The current back-buffer index lives on IDXGISwapChain3.
+        // If victory's swap chain is a proxy that only implements
+        // the base interface, this is the call the wrap dies on.
+        IDXGISwapChain3 *sc3 = nullptr;
+        p.sc3Hr = swapchain->QueryInterface(IID_PPV_ARGS(&sc3));
+        if (sc3) {
+            p.backBufferIndex = sc3->GetCurrentBackBufferIndex();
+            sc3->Release();
+        }
+        IDXGISwapChain4 *sc4 = nullptr;
+        p.sc4Hr = swapchain->QueryInterface(IID_PPV_ARGS(&sc4));
+        if (sc4) sc4->Release();
+        BOOL fs = FALSE;
+        p.fullscreenHr = swapchain->GetFullscreenState(&fs, nullptr);
+        p.fullscreen = fs;
+        IDXGIOutput *output = nullptr;
+        p.outputHr = swapchain->GetContainingOutput(&output);
+        if (output) output->Release();
     }
     return p;
 }
@@ -396,12 +454,18 @@ void writeWrapDiag(const wchar_t *folder, const DXGI_SWAP_CHAIN_DESC1 *desc1, HR
              (unsigned)hrDev, deviceMatches ? L"yes" : L"NO");
     fwprintf(f, L"game queue: %p\n", gameQueue);
     if (probes) {
-        fwprintf(f, L"probes: queue timestamp hr=0x%08x freq=%llu; test queue hr=0x%08x; test fence hr=0x%08x; test allocator hr=0x%08x; test list hr=0x%08x; test texture hr=0x%08x; GetBuffer(0) hr=0x%08x; GetParent hr=0x%08x\n",
+        fwprintf(f, L"probes: queue timestamp hr=0x%08x freq=%llu; test queue hr=0x%08x; test fence hr=0x%08x; test allocator hr=0x%08x; test list hr=0x%08x; test texture hr=0x%08x; descriptor heap hr=0x%08x; copy queue hr=0x%08x; compute queue hr=0x%08x; shared fence hr=0x%08x; GetBuffer(0) hr=0x%08x; GetParent hr=0x%08x\n",
                  (unsigned)probes->queueTimestampHr, (unsigned long long)probes->queueTimestampFreq,
                  (unsigned)probes->testQueueHr, (unsigned)probes->testFenceHr,
                  (unsigned)probes->testAllocatorHr, (unsigned)probes->testListHr,
-                 (unsigned)probes->testTextureHr, (unsigned)probes->getBufferHr,
+                 (unsigned)probes->testTextureHr, (unsigned)probes->heapHr,
+                 (unsigned)probes->copyQueueHr, (unsigned)probes->computeQueueHr,
+                 (unsigned)probes->sharedFenceHr, (unsigned)probes->getBufferHr,
                  (unsigned)probes->getParentHr);
+        fwprintf(f, L"probes: swapchain3 hr=0x%08x backBufferIndex=%u; swapchain4 hr=0x%08x; fullscreen hr=0x%08x fullscreen=%d; containing output hr=0x%08x\n",
+                 (unsigned)probes->sc3Hr, (unsigned)probes->backBufferIndex,
+                 (unsigned)probes->sc4Hr, (unsigned)probes->fullscreenHr,
+                 (int)probes->fullscreen, (unsigned)probes->outputHr);
     }
     fwprintf(f, L"wrap result: code=%d (%s)\n", resultCode, wrapped ? L"wrapped OK" : L"FAILED");
     fclose(f);
