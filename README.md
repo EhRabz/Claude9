@@ -255,6 +255,7 @@ fork has always had; its options:
 |---|---|
 | *(none)* | Series X profile, 2560x1440, DLSS Quality, no frame rate cap, frame generation ready but off |
 | `-FrameGen`, `-FrameGenX 4` | frame generation on from the start, 2 to 6 frames shown for each one rendered |
+| `-Fsr3FrameGen` | FSR 3 frame generation on from the start, 2x, with the title's own upscaling — for RTX 30-series and other GPUs DLSS frame generation cannot run on (run `Get-FSR3.cmd` once first) |
 | `-Dlss off` / `dlaa` / `balanced` / `performance` | the title's own upscaling, or another DLSS mode |
 | `-Fps 60` | a frame rate cap (30 is the title's own) |
 | `-SeriesS` | the Series S profile: 1280x720 inside, faster, softer |
