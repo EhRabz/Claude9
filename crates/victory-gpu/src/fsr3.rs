@@ -402,15 +402,18 @@ pub fn init(asked: &Asked) -> Available {
     // Mutual exclusion with DLSS frame generation: two proxy swap
     // chains cannot both own the present. DLSS was initialised first
     // (run.rs); if its frame generation is live, FSR 3 stays off.
-    // DLSS upscaling alone does not block FSR 3: on this machine
-    // (RTX 3080 Ti) DLSS frame generation is not available at all,
-    // so DLSS upscaling + FSR 3 frame generation is the combination
-    // that runs at 1440p. (streamline::serving() is the wrong check
-    // here: it is true whenever DLSS upscaling serves, even with no
-    // frame generation — the control run proved it.)
-    if streamline::framegen_live() {
+    // The MFG Unlocker is initialised before Streamline in run.rs, so
+    // when it is loaded DLSS frame generation is the path in use even
+    // before Streamline reports it. DLSS upscaling alone does not
+    // block FSR 3: on this machine (RTX 3080 Ti) DLSS frame generation
+    // is not available at all, so DLSS upscaling + FSR 3 frame
+    // generation is the combination that runs at 1440p.
+    // (streamline::serving() is the wrong check here: it is true
+    // whenever DLSS upscaling serves, even with no frame generation —
+    // the control run proved it.)
+    if streamline::framegen_live() || crate::mfg::loaded() {
         tracing::warn!(
-            "FSR 3 frame generation and DLSS frame generation were both asked for: DLSS frame generation wins, FSR 3 stays off (set only one of VICTORY_FRAMEGEN / VICTORY_FSR3_FG)"
+            "FSR 3 frame generation and DLSS frame generation were both asked for: DLSS frame generation wins, FSR 3 stays off (set only one of VICTORY_FRAMEGEN / VICTORY_FSR3_FG / VICTORY_MFG)"
         );
         return Available::default();
     }

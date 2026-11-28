@@ -60,6 +60,13 @@ pub fn run(
     // is loaded before anything of the title or the host GPU, and fails soft;
     // only if it offers one of them does the title render through its
     // FidelityFX path, which DLSS takes over (`native_1440p::prepare_upscaler`).
+    // MFG Unlocker (`VICTORY_MFG`): the released MFGUnlocker.dll, loaded
+    // before Streamline so its loader hooks patch the DLSS-G provider
+    // (Ada 0x190 -> Ampere 0x170, and the >2x count gate) when Streamline
+    // loads it. Fails soft; without it DLSS frame generation stays as
+    // Streamline reports it (not available on RTX 30).
+    let mfg_asked = victory_hle::mfg::Asked::from_env().map_err(anyhow::Error::msg)?;
+    let mfg_loaded = victory_hle::mfg::init(&mfg_asked);
     let asked = victory_hle::streamline::Asked::from_env().map_err(anyhow::Error::msg)?;
     let available = victory_hle::streamline::init(&asked);
     // FSR 3 frame generation (`VICTORY_FSR3_FG=1`): the bridge is loaded
@@ -86,6 +93,16 @@ pub fn run(
             ("on (2x, title's own upscaling)", ", scene at the native scale".to_owned())
         };
         println!("upscaling      FSR 3 frame generation {state}{scale}");
+    }
+    if mfg_asked.enabled {
+        println!(
+            "frame generation MFG Unlocker {}",
+            if mfg_loaded {
+                "loaded: DLSS frame generation unlocked for this GPU (see RTXMFG-*.log beside this program)"
+            } else {
+                "asked, not loaded"
+            }
+        );
     }
     // `VICTORY_FSR_PATH=1`: the title's FidelityFX path at VICTORY_DLSS_MODE's
     // scale with its own FidelityFX upscaling (no Streamline): DLSS's

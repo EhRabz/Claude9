@@ -90,6 +90,10 @@ pub mod signature;
 pub mod streamline;
 #[cfg(windows)]
 pub mod fsr3;
+/// MFG Unlocker (`VICTORY_MFG`), unlocking DLSS frame generation on
+/// RTX 30-series through the released MFGUnlocker.dll.
+#[cfg(windows)]
+pub mod mfg;
 mod switch;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod ab;

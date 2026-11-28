@@ -5,7 +5,7 @@
 
 [paths]
 # Your own dump of the title.     env: VICTORY_GAME_DIR
-game_dir = 'D:\victory-data\game'
+game_dir = 'E:\GTA\'
 
 # Derived data. Default: %LOCALAPPDATA%\victory\cache.   env: VICTORY_CACHE_DIR
 # cache_dir = 'D:\victory-data\cache'

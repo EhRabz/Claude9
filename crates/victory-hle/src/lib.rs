@@ -31,6 +31,10 @@ pub use victory_gpu::streamline;
 /// frame generation.
 #[cfg(windows)]
 pub use victory_gpu::fsr3;
+/// MFG Unlocker (`VICTORY_MFG`), unlocking DLSS frame generation on
+/// RTX 30-series through the released MFGUnlocker.dll.
+#[cfg(windows)]
+pub use victory_gpu::mfg;
 #[cfg(all(windows, feature = "diagnostics"))]
 pub use victory_gpu::replay;
 

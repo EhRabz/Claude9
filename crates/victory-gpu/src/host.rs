@@ -2927,7 +2927,13 @@ fn late_blocked(runs: &[&HostList]) -> Option<usize> {
 fn fill_is_titles(src: usize, len: usize) -> bool {
     const SMALL: usize = 64 << 10;
     static ON: OnceLock<bool> = OnceLock::new();
-    let on = *ON.get_or_init(|| std::env::var_os("VICTORY_FILL_TITLE").is_some_and(|v| v == "1"));
+    // Default-on: the 480-byte ring-constants fill in the title's 174 MB heap
+    // was forcing a ~65 ms settle every frame (read_blocked -> late_blocked ->
+    // relay_wait in submit), because every in-flight flight declares the whole
+    // heap written. The fill reads bytes the title CPU just wrote; the
+    // written_since_taken / landed_lately guards below are the safety net.
+    // Opt out with VICTORY_FILL_TITLE=0.
+    let on = *ON.get_or_init(|| std::env::var_os("VICTORY_FILL_TITLE").is_none_or(|v| v != "0"));
     on && len <= SMALL && (crate::watch::written_since_taken(src, len) || !crate::watch::landed_lately(src, len, 600))
 }
 
@@ -3108,7 +3114,10 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                 }
                 Step::Texture(staging) => {
                     let (at, len) = staging.memory();
-                    if touches(written, at, at + len) {
+                    // Same exception as Fill/Copy: a small staging read of
+                    // title memory the title CPU just wrote should not wait
+                    // for every in-flight flight to land (see fill_is_titles).
+                    if read_blocked(written, at, len) {
                         if count {
                             LATE_STATS[17].fetch_add(1, Ordering::Relaxed);
                             #[cfg(feature = "diagnostics")]
@@ -3118,7 +3127,10 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                     }
                 }
                 &Step::Plane((at, len), _) => {
-                    if touches(written, at, at.saturating_add(len)) {
+                    // Same exception as Fill/Copy: a small plane read of
+                    // title memory the title CPU just wrote should not wait
+                    // for every in-flight flight to land (see fill_is_titles).
+                    if read_blocked(written, at, len) {
                         if count {
                             LATE_STATS[17].fetch_add(1, Ordering::Relaxed);
                             #[cfg(feature = "diagnostics")]
@@ -5693,7 +5705,9 @@ impl Host {
                 // Only until the flights that may write what is read have
                 // landed: their copy-back's end, not the card's other work.
                 relay_wait(why, |line| {
-                    blocked_by(&line.written, runs, false).is_none() && !card_steps::copied_read(&card_steps::copies(line), runs)
+                    // Count the sub-reason (buffer copy / fill / texture) so
+                    // the log says which step is still settling.
+                    blocked_by(&line.written, runs, true).is_none() && !card_steps::copied_read(&card_steps::copies(line), runs)
                 });
             } else {
                 self.settle(&mut submitted, why);

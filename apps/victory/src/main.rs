@@ -145,6 +145,12 @@ enum Command {
     /// and other GPUs DLSS frame generation cannot run on.
     #[cfg(windows)]
     GetFsr3,
+    /// Fetch the MFG Unlocker release (v1.7.2, about 5 MB) and put its
+    /// `MFGUnlocker.dll` where `play` looks for it, unlocking DLSS
+    /// frame generation on RTX 30-series and other GPUs DLSS frame
+    /// generation cannot run on.
+    #[cfg(windows)]
+    GetMfg,
     /// Prepare, map and bind a title executable; with --execute, run it.
     Run {
         exe: PathBuf,
@@ -279,6 +285,7 @@ fn main() -> Result<()> {
         #[cfg(windows)]
         Command::GetDlss => play::get_dlss(),
         Command::GetFsr3 => play::get_fsr3(),
+        Command::GetMfg => play::get_mfg(),
         Command::Run {
             exe,
             unimplemented,

@@ -26,6 +26,8 @@ const GAME: &str = "game_scarlett_master.exe";
 const FETCH: &str = include_str!("../../../scripts/get-nvidia-sdks.ps1");
 /// `scripts\get-fsr3.ps1`, run by Windows PowerShell.
 const FETCH_FSR3: &str = include_str!("../../../scripts/get-fsr3.ps1");
+/// `scripts\get-mfg.ps1`, run by Windows PowerShell.
+const FETCH_MFG: &str = include_str!("../../../scripts/get-mfg.ps1");
 /// The bridge's sources, written beside the script when `get-fsr3` runs
 /// away from the repository (its `-BridgeDir` then names that folder).
 const FSR3_BRIDGE_H: &str = include_str!("../../../tools/fsr3-bridge/fsr3_bridge.h");
@@ -129,6 +131,14 @@ pub(crate) struct Play {
     /// chain at a time. Needs the bridge built by `victory get-fsr3`.
     #[arg(long)]
     fsr3_framegen: bool,
+    /// DLSS Multi Frame Generation unlocked on RTX 30-series (MFG
+    /// Unlocker v1.7.2): DLSS frame generation on from the start, 2x
+    /// (or --framegen's amount). Never together with --fsr3-framegen:
+    /// one frame-generation swap chain at a time. Needs the DLL fetched
+    /// by `victory get-mfg` (Get-MFG.cmd). Without the DLL this is just
+    /// --framegen, which Streamline refuses on RTX 30.
+    #[arg(long)]
+    mfg: bool,
     /// Frame generation not made ready at the start.
     #[arg(long)]
     no_framegen_ready: bool,
@@ -159,6 +169,10 @@ fn has_fsr3_bridge(dir: &Path) -> bool {
     dir.join("fsr3_bridge.dll").is_file()
 }
 
+fn has_mfg(dir: &Path) -> bool {
+    dir.join("MFGUnlocker.dll").is_file()
+}
+
 /// The folder with FSR 3's bridge: the one `VICTORY_FSR3_DIR` names,
 /// where `get-fsr3` puts it, or beside this program (a repository's
 /// `fsr3-sdk`, or the files themselves).
@@ -167,6 +181,16 @@ fn fsr3_dir(here: &Path) -> Option<PathBuf> {
     let ours = home().ok().map(|d| d.join("fsr3-sdk"));
     let beside = [here.join("fsr3-sdk"), here.to_path_buf()];
     named.into_iter().chain(ours).chain(beside).find(|d| has_fsr3_bridge(d))
+}
+
+/// The folder with the MFG Unlocker DLL: the one `VICTORY_MFG_DIR` names,
+/// where `get-mfg` puts it, or beside this program (a repository's
+/// `mfg`, or the files themselves).
+fn mfg_dir(here: &Path) -> Option<PathBuf> {
+    let named = std::env::var_os("VICTORY_MFG_DIR").filter(|v| !v.is_empty()).map(PathBuf::from);
+    let ours = home().ok().map(|d| d.join("mfg"));
+    let beside = [here.join("mfg"), here.to_path_buf()];
+    named.into_iter().chain(ours).chain(beside).find(|d| has_mfg(d))
 }
 
 /// The folder with NVIDIA's files: the one `VICTORY_STREAMLINE_DIR` names,
@@ -194,11 +218,13 @@ fn parse_menu(text: &str) -> Vec<(String, String)> {
 /// options, what the menu saved over them (`menu`), `--set` over both.
 /// `streamline`: the folder with NVIDIA's files, if there is one.
 /// `fsr3`: the folder with FSR 3's bridge, if there is one.
+/// `mfg`: the folder with the MFG Unlocker DLL, if there is one.
 fn settings(
     o: &Play,
     menu: &[(String, String)],
     streamline: Option<&Path>,
     fsr3: Option<&Path>,
+    mfg: Option<&Path>,
 ) -> (BTreeMap<String, String>, bool) {
     let saved = |k: &str| menu.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
     let series_s = saved("VICTORY_MENU_CONSOLE").map_or(o.series_s, |c| c == "series-s");
@@ -224,6 +250,13 @@ fn settings(
         .and_then(|f| f.parse::<u32>().ok())
         .filter(|f| (1..=1000).contains(f))
         .unwrap_or(o.fps);
+    // MFG Unlocker: DLSS frame generation on, at --framegen's amount
+    // (2 unless set). The FSR 3 check below then turns FSR 3 off, as
+    // it does for --framegen.
+    let mfg_wanted = o.mfg;
+    if mfg_wanted {
+        framegen = true;
+    }
 
     let mut s: BTreeMap<String, String> = SETTINGS.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
     let mut set = |k: &str, v: &str| drop(s.insert(k.to_owned(), v.to_owned()));
@@ -263,6 +296,14 @@ fn settings(
             // otherwise fills with textures: on from the start it is left a fifth of the
             // budget; ready but off, a little less is held back.
             set("VICTORY_TEXTURE_ROOM_PERCENT", if framegen { "80" } else { "86" });
+        }
+        // MFG Unlocker: only with its DLL there; without it this is
+        // just --framegen, which Streamline refuses on RTX 30.
+        if mfg_wanted
+            && let Some(dir) = mfg
+        {
+            set("VICTORY_MFG", "1");
+            set("VICTORY_MFG_DIR", &dir.to_string_lossy());
         }
     }
     let mut fsr3_on = false;
@@ -402,6 +443,30 @@ pub(crate) fn get_fsr3() -> Result<()> {
     Ok(())
 }
 
+/// `victory get-mfg`: fetches the MFG Unlocker release (v1.7.2) and puts
+/// `MFGUnlocker.dll` where the launcher looks for it.
+pub(crate) fn get_mfg() -> Result<()> {
+    let to = home()?.join("mfg");
+    let script = to.join("get-mfg.ps1");
+    std::fs::create_dir_all(&to).with_context(|| format!("creating {}", to.display()))?;
+    std::fs::write(&script, FETCH_MFG).with_context(|| format!("writing {}", script.display()))?;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&script)
+        .arg("-InstallDir")
+        .arg(&to)
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .context("running get-mfg.ps1: Windows PowerShell")?;
+    let _ = std::fs::remove_file(&script);
+    anyhow::ensure!(
+        out.status.success() && has_mfg(&to),
+        "the MFG Unlocker DLL did not arrive (see above); DLSS frame generation stays as Streamline reports it"
+    );
+    Ok(())
+}
+
 /// Asks once, at a start without NVIDIA's files, whether to fetch them.
 fn offer_dlss() {
     let Ok(to) = nvidia_home() else { return };
@@ -476,7 +541,11 @@ pub(crate) fn prepare(o: &Play) -> Result<Ready> {
     if wants_fsr3 && fsr3.is_none() {
         println!("No FSR 3 bridge: running without FSR 3 frame generation (`victory get-fsr3` builds it).");
     }
-    let (mut s, series_s) = settings(o, &menu, streamline.as_deref(), fsr3.as_deref());
+    let mfg = mfg_dir(&here);
+    if o.mfg && mfg.is_none() {
+        println!("No MFG Unlocker DLL: running without the unlock (`victory get-mfg` fetches it).");
+    }
+    let (mut s, series_s) = settings(o, &menu, streamline.as_deref(), fsr3.as_deref(), mfg.as_deref());
     // Where the menu saves, and how it starts the title again (`--set` is not carried over).
     let quoted = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
     s.insert("VICTORY_MENU_FILE".to_owned(), menu_file.to_string_lossy().into_owned());
@@ -484,10 +553,11 @@ pub(crate) fn prepare(o: &Play) -> Result<Ready> {
     s.insert(
         "VICTORY_MENU_ARGS".to_owned(),
         format!(
-            "play {}{}{}",
+            "play {}{}{}{}",
             quoted(&exe),
             if o.no_framegen_ready { " --no-framegen-ready" } else { "" },
-            if o.fsr3_framegen { " --fsr3-framegen" } else { "" }
+            if o.fsr3_framegen { " --fsr3-framegen" } else { "" },
+            if o.mfg { " --mfg" } else { "" }
         ),
     );
     let log = log_file(&home.join("logs"))?;
@@ -536,6 +606,7 @@ mod tests {
             dlss: "quality".to_owned(),
             framegen: None,
             fsr3_framegen: false,
+            mfg: false,
             no_framegen_ready: false,
             fps: 1000,
             more: Vec::new(),
@@ -545,7 +616,7 @@ mod tests {
     #[test]
     fn a_plain_start_is_the_launchers() {
         let dir = Path::new(r"C:\nvidia");
-        let (s, series_s) = settings(&options(), &[], Some(dir), None);
+        let (s, series_s) = settings(&options(), &[], Some(dir), None, None);
         assert!(!series_s);
         for (k, v) in SETTINGS {
             assert_eq!(s.get(*k).map(String::as_str), Some(*v), "{k}");
@@ -564,7 +635,7 @@ mod tests {
 
     #[test]
     fn without_nvidias_files_there_is_no_dlss() {
-        let (s, _) = settings(&options(), &[], None, None);
+        let (s, _) = settings(&options(), &[], None, None, None);
         assert!(!s.contains_key("VICTORY_DLSS") && !s.contains_key("VICTORY_FRAMEGEN"));
         assert!(!s.contains_key("VICTORY_TEXTURE_ROOM_PERCENT"));
         assert_eq!(s.get("VICTORY_MENU_DLSS").map(String::as_str), Some("off"));
@@ -577,7 +648,7 @@ mod tests {
              VICTORY_MENU_DLSS=performance\r\nVICTORY_MENU_FPS=60\r\nVICTORY_BVH_BUILDER=\r\n\
              VICTORY_AMBIENT=0.5\r\nVICTORY_EARLY_DEPTH=\r\nnot a setting=1\r\n",
         );
-        let (s, series_s) = settings(&options(), &menu, Some(Path::new("x")), None);
+        let (s, series_s) = settings(&options(), &menu, Some(Path::new("x")), None, None);
         let get = |k: &str| s.get(k).map(String::as_str);
         assert!(series_s);
         // the Series S profile has no picture size of its own
@@ -596,7 +667,7 @@ mod tests {
         let mut o = options();
         (o.res, o.dlss, o.framegen, o.fps) = ("1080to1440".to_owned(), "off".to_owned(), Some(4), 30);
         o.more = vec!["VICTORY_AMBIENT=0".to_owned(), "VICTORY_NEW = 2".to_owned()];
-        let (s, _) = settings(&o, &[], Some(Path::new("x")), None);
+        let (s, _) = settings(&o, &[], Some(Path::new("x")), None, None);
         let get = |k: &str| s.get(k).map(String::as_str);
         assert_eq!((get("VICTORY_RENDER_1080P"), get("VICTORY_NATIVE_1440P")), (Some("1"), None));
         // no DLSS, so no frame generation either
@@ -609,7 +680,7 @@ mod tests {
     fn fsr3_framegen_without_streamline_runs_with_the_titles_own_upscaling() {
         let mut o = options();
         o.fsr3_framegen = true;
-        let (s, _) = settings(&o, &[], None, Some(Path::new(r"C:\fsr3")));
+        let (s, _) = settings(&o, &[], None, Some(Path::new(r"C:\fsr3")), None);
         let get = |k: &str| s.get(k).map(String::as_str);
         assert_eq!(get("VICTORY_FSR3_FG"), Some("1"));
         assert_eq!(get("VICTORY_FSR3_DIR"), Some(r"C:\fsr3"));
@@ -624,7 +695,7 @@ mod tests {
     fn fsr3_framegen_keeps_dlss_upscaling_but_not_dlss_framegen() {
         let mut o = options();
         o.fsr3_framegen = true;
-        let (s, _) = settings(&o, &[], Some(Path::new("x")), Some(Path::new(r"C:\fsr3")));
+        let (s, _) = settings(&o, &[], Some(Path::new("x")), Some(Path::new(r"C:\fsr3")), None);
         let get = |k: &str| s.get(k).map(String::as_str);
         assert_eq!(get("VICTORY_FSR3_FG"), Some("1"));
         assert_eq!(get("VICTORY_FSR3_DIR"), Some(r"C:\fsr3"));
@@ -642,9 +713,34 @@ mod tests {
         let mut o = options();
         o.fsr3_framegen = true;
         o.framegen = Some(2);
-        let (s, _) = settings(&o, &[], Some(Path::new("x")), Some(Path::new(r"C:\fsr3")));
+        let (s, _) = settings(&o, &[], Some(Path::new("x")), Some(Path::new(r"C:\fsr3")), None);
         let get = |k: &str| s.get(k).map(String::as_str);
         assert_eq!((get("VICTORY_DLSS"), get("VICTORY_FRAMEGEN_X")), (Some("1"), Some("2")));
+        assert_eq!(get("VICTORY_FSR3_FG"), None);
+        assert_eq!(get("VICTORY_MENU_FSR3_FG"), Some("0"));
+    }
+
+    #[test]
+    fn mfg_turns_dlss_framegen_on() {
+        let mut o = options();
+        o.mfg = true;
+        let (s, _) = settings(&o, &[], Some(Path::new("x")), None, Some(Path::new(r"C:\mfg")));
+        let get = |k: &str| s.get(k).map(String::as_str);
+        assert_eq!(get("VICTORY_MFG"), Some("1"));
+        assert_eq!(get("VICTORY_MFG_DIR"), Some(r"C:\mfg"));
+        assert_eq!((get("VICTORY_FRAMEGEN"), get("VICTORY_FRAMEGEN_X")), (Some("1"), Some("2")));
+        assert_eq!(get("VICTORY_TEXTURE_ROOM_PERCENT"), Some("80"));
+    }
+
+    #[test]
+    fn mfg_wins_over_fsr3() {
+        let mut o = options();
+        o.mfg = true;
+        o.fsr3_framegen = true;
+        let (s, _) = settings(&o, &[], Some(Path::new("x")), Some(Path::new(r"C:\fsr3")), Some(Path::new(r"C:\mfg")));
+        let get = |k: &str| s.get(k).map(String::as_str);
+        assert_eq!(get("VICTORY_MFG"), Some("1"));
+        assert_eq!((get("VICTORY_FRAMEGEN"), get("VICTORY_FRAMEGEN_X")), (Some("1"), Some("2")));
         assert_eq!(get("VICTORY_FSR3_FG"), None);
         assert_eq!(get("VICTORY_MENU_FSR3_FG"), Some("0"));
     }

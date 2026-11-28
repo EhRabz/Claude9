@@ -1,0 +1,792 @@
+diff -ruN a/.gitignore b/.gitignore
+--- a/.gitignore	2026-11-28 03:58:54.431525592 -0500
++++ b/.gitignore	2026-11-28 03:58:54.435970684 -0500
+@@ -82,6 +82,8 @@
+ # AMD's own files and FSR 3's bridge (Get-FSR3.cmd builds the bridge against the FidelityFX SDK
+ # and fetches AMD's DLL; never part of this repository)
+ /fsr3-sdk/
++# MFG Unlocker's own release DLL (Get-MFG.cmd fetches it from the author's GitHub; never part of this repository)
++/mfg/
+ # What the F1 menu saved
+ /victory-settings.txt
+ /victory-settings.*.txt
+diff -ruN a/Get-MFG.cmd b/Get-MFG.cmd
+--- a/Get-MFG.cmd	1969-12-31 19:00:00.000000000 -0500
++++ b/Get-MFG.cmd	2026-11-28 03:58:54.433328474 -0500
+@@ -0,0 +1,8 @@
++@echo off
++rem Fetches the released MFG Unlocker (dashdogy/MFG-Unlocker v1.7.2, MIT) and puts its MFGUnlocker.dll
++rem where the launcher looks for it (mfg\ in this folder). Run it once. It is the author's own release
++rem under the author's licence, SHA-256-checked by the script; this repository does not contain it.
++rem Without it DLSS frame generation stays as Streamline reports it (not available on RTX 30).
++powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\get-mfg.ps1" %*
++echo.
++pause
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-11-28 03:58:54.431621937 -0500
++++ b/README.md	2026-11-28 03:58:54.436120098 -0500
+@@ -235,7 +235,8 @@
+ SSD, an NVIDIA GeForce RTX card with a recent driver (RTX 40 or later for DLSS
+ frame generation, with hardware-accelerated GPU scheduling on; more than 2x
+ needs an RTX 50; RTX 30-series can do frame generation through FSR 3 instead,
+-see [FSR 3 frame generation](#fsr-3-frame-generation)),
++see [FSR 3 frame generation](#fsr-3-frame-generation), or through DLSS frame
++generation unlocked by MFG Unlocker, see [MFG Unlocker](#mfg-unlocker)),
+ [Rust](https://rustup.rs) (the toolchain is pinned), the Visual Studio Build
+ Tools with "Desktop development with C++", and **your own dump** of the title's
+ Xbox Series build v1.0.2.1 (the folder with `game_scarlett_master.exe`).
+@@ -267,6 +268,7 @@
+ | *(none)* | Series X profile, 2560x1440, DLSS Quality, no frame rate cap, frame generation ready but off |
+ | `-FrameGen`, `-FrameGenX 4` | frame generation on from the start, 2 to 6 frames shown for each one rendered |
+ | `-Fsr3FrameGen` | FSR 3 frame generation on from the start, 2x, with DLSS upscaling — for RTX 30-series and other GPUs DLSS frame generation cannot run on (run `Get-FSR3.cmd` once first; see [FSR 3 frame generation](#fsr-3-frame-generation)) |
++| `-Mfg` | DLSS frame generation unlocked on RTX 30-series, on from the start at `-FrameGenX` (2 unless set) — run `Get-MFG.cmd` once first; see [MFG Unlocker](#mfg-unlocker) |
+ | `-Dlss off` / `dlaa` / `balanced` / `performance` | the title's own upscaling, or another DLSS mode |
+ | `-Fps 60` | a frame rate cap (30 is the title's own) |
+ | `-SeriesS` | the Series S profile: 1280x720 inside, faster, softer |
+@@ -280,6 +282,33 @@
+ `.\scripts\fullscreen.ps1` in another window. Logs go to
+ `%LOCALAPPDATA%\victory\logs`, saves to `%LOCALAPPDATA%\victory\data`.
+ 
++## MFG Unlocker
++
++On an RTX 30-series card, DLSS frame generation can also be unlocked
++with the released MFG Unlocker DLL (dashdogy/MFG-Unlocker v1.7.2, MIT),
++instead of FSR 3. Run `.\Get-MFG.cmd` once: it fetches the author's
++release (about 5 MB) into `mfg\` (git-ignored) and checks its SHA-256.
++Then start with `-Mfg` (or `victory play --mfg`); the F1 menu's FRAME
++GENERATION item then switches it 2X to 6X while playing, as on an
++RTX 40/50 card.
++
++The DLL is the author's own release, fetched by the user; this
++repository does not carry it, the same as NVIDIA's and AMD's files.
++It is loaded before Streamline and patches the DLSS-G provider in
++memory only — the provider's Ada minimum (0x190) becomes Ampere
++(0x170) and its >2x count gate is lifted — so Streamline reports
++frame generation as supported. No file, driver or Streamline code
++is changed. It is never used together with FSR 3 frame generation:
++DLSS wins if both are asked for.
++
++2x is the likely win; 3x to 6x depends on the count-gate patch
++landing for the exact DLSS-G provider Streamline 2.14.16 ships. The
++Unlocker's own log (`RTXMFG-*.log` beside `victory.exe`) says which
++provider it saw and what it patched. And it only shows more frames
++per rendered frame — it does not render faster, so the rendered rate
++stays where it was. Its Backspace menu may not appear in this title
++(it hooks the present for its overlay); the unlock does not need it.
++
+ ## FSR 3 frame generation
+ 
+ DLSS frame generation needs an RTX 40-series card or later. On an RTX
+diff -ruN a/apps/victory/src/main.rs b/apps/victory/src/main.rs
+--- a/apps/victory/src/main.rs	2026-11-28 03:58:54.431207185 -0500
++++ b/apps/victory/src/main.rs	2026-11-28 03:58:54.434860530 -0500
+@@ -145,6 +145,12 @@
+     /// and other GPUs DLSS frame generation cannot run on.
+     #[cfg(windows)]
+     GetFsr3,
++    /// Fetch the MFG Unlocker release (v1.7.2, about 5 MB) and put its
++    /// `MFGUnlocker.dll` where `play` looks for it, unlocking DLSS
++    /// frame generation on RTX 30-series and other GPUs DLSS frame
++    /// generation cannot run on.
++    #[cfg(windows)]
++    GetMfg,
+     /// Prepare, map and bind a title executable; with --execute, run it.
+     Run {
+         exe: PathBuf,
+@@ -279,6 +285,7 @@
+         #[cfg(windows)]
+         Command::GetDlss => play::get_dlss(),
+         Command::GetFsr3 => play::get_fsr3(),
++        Command::GetMfg => play::get_mfg(),
+         Command::Run {
+             exe,
+             unimplemented,
+diff -ruN a/apps/victory/src/play.rs b/apps/victory/src/play.rs
+--- a/apps/victory/src/play.rs	2026-11-28 03:58:54.431072493 -0500
++++ b/apps/victory/src/play.rs	2026-11-28 03:58:54.435392598 -0500
+@@ -26,6 +26,8 @@
+ const FETCH: &str = include_str!("../../../scripts/get-nvidia-sdks.ps1");
+ /// `scripts\get-fsr3.ps1`, run by Windows PowerShell.
+ const FETCH_FSR3: &str = include_str!("../../../scripts/get-fsr3.ps1");
++/// `scripts\get-mfg.ps1`, run by Windows PowerShell.
++const FETCH_MFG: &str = include_str!("../../../scripts/get-mfg.ps1");
+ /// The bridge's sources, written beside the script when `get-fsr3` runs
+ /// away from the repository (its `-BridgeDir` then names that folder).
+ const FSR3_BRIDGE_H: &str = include_str!("../../../tools/fsr3-bridge/fsr3_bridge.h");
+@@ -129,6 +131,14 @@
+     /// chain at a time. Needs the bridge built by `victory get-fsr3`.
+     #[arg(long)]
+     fsr3_framegen: bool,
++    /// DLSS Multi Frame Generation unlocked on RTX 30-series (MFG
++    /// Unlocker v1.7.2): DLSS frame generation on from the start, 2x
++    /// (or --framegen's amount). Never together with --fsr3-framegen:
++    /// one frame-generation swap chain at a time. Needs the DLL fetched
++    /// by `victory get-mfg` (Get-MFG.cmd). Without the DLL this is just
++    /// --framegen, which Streamline refuses on RTX 30.
++    #[arg(long)]
++    mfg: bool,
+     /// Frame generation not made ready at the start.
+     #[arg(long)]
+     no_framegen_ready: bool,
+@@ -159,6 +169,10 @@
+     dir.join("fsr3_bridge.dll").is_file()
+ }
+ 
++fn has_mfg(dir: &Path) -> bool {
++    dir.join("MFGUnlocker.dll").is_file()
++}
++
+ /// The folder with FSR 3's bridge: the one `VICTORY_FSR3_DIR` names,
+ /// where `get-fsr3` puts it, or beside this program (a repository's
+ /// `fsr3-sdk`, or the files themselves).
+@@ -169,6 +183,16 @@
+     named.into_iter().chain(ours).chain(beside).find(|d| has_fsr3_bridge(d))
+ }
+ 
++/// The folder with the MFG Unlocker DLL: the one `VICTORY_MFG_DIR` names,
++/// where `get-mfg` puts it, or beside this program (a repository's
++/// `mfg`, or the files themselves).
++fn mfg_dir(here: &Path) -> Option<PathBuf> {
++    let named = std::env::var_os("VICTORY_MFG_DIR").filter(|v| !v.is_empty()).map(PathBuf::from);
++    let ours = home().ok().map(|d| d.join("mfg"));
++    let beside = [here.join("mfg"), here.to_path_buf()];
++    named.into_iter().chain(ours).chain(beside).find(|d| has_mfg(d))
++}
++
+ /// The folder with NVIDIA's files: the one `VICTORY_STREAMLINE_DIR` names,
+ /// where `get-dlss` puts them, or beside this program (a repository's
+ /// `nvidia-sdk`, or the files themselves).
+@@ -199,6 +223,7 @@
+     menu: &[(String, String)],
+     streamline: Option<&Path>,
+     fsr3: Option<&Path>,
++    mfg: Option<&Path>,
+ ) -> (BTreeMap<String, String>, bool) {
+     let saved = |k: &str| menu.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+     let series_s = saved("VICTORY_MENU_CONSOLE").map_or(o.series_s, |c| c == "series-s");
+@@ -224,6 +249,13 @@
+         .and_then(|f| f.parse::<u32>().ok())
+         .filter(|f| (1..=1000).contains(f))
+         .unwrap_or(o.fps);
++    // MFG Unlocker: DLSS frame generation on, at --framegen's amount
++    // (2 unless set). The FSR 3 check below then turns FSR 3 off, as
++    // it does for --framegen.
++    let mfg_wanted = o.mfg;
++    if mfg_wanted {
++        framegen = true;
++    }
+ 
+     let mut s: BTreeMap<String, String> = SETTINGS.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+     let mut set = |k: &str, v: &str| drop(s.insert(k.to_owned(), v.to_owned()));
+@@ -264,6 +296,14 @@
+             // budget; ready but off, a little less is held back.
+             set("VICTORY_TEXTURE_ROOM_PERCENT", if framegen { "80" } else { "86" });
+         }
++        // MFG Unlocker: only with its DLL there; without it this is
++        // just --framegen, which Streamline refuses on RTX 30.
++        if mfg_wanted
++            && let Some(dir) = mfg
++        {
++            set("VICTORY_MFG", "1");
++            set("VICTORY_MFG_DIR", &dir.to_string_lossy());
++        }
+     }
+     let mut fsr3_on = false;
+     if fsr3_wanted
+@@ -402,6 +442,30 @@
+     Ok(())
+ }
+ 
++/// `victory get-mfg`: fetches the MFG Unlocker release (v1.7.2) and puts
++/// `MFGUnlocker.dll` where the launcher looks for it.
++pub(crate) fn get_mfg() -> Result<()> {
++    let to = home()?.join("mfg");
++    let script = to.join("get-mfg.ps1");
++    std::fs::create_dir_all(&to).with_context(|| format!("creating {}", to.display()))?;
++    std::fs::write(&script, FETCH_MFG).with_context(|| format!("writing {}", script.display()))?;
++    let out = std::process::Command::new("powershell")
++        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
++        .arg(&script)
++        .arg("-InstallDir")
++        .arg(&to)
++        .stdout(std::process::Stdio::inherit())
++        .stderr(std::process::Stdio::inherit())
++        .output()
++        .context("running get-mfg.ps1: Windows PowerShell")?;
++    let _ = std::fs::remove_file(&script);
++    anyhow::ensure!(
++        out.status.success() && has_mfg(&to),
++        "the MFG Unlocker DLL did not arrive (see above); DLSS frame generation stays as Streamline reports it"
++    );
++    Ok(())
++}
++
+ /// Asks once, at a start without NVIDIA's files, whether to fetch them.
+ fn offer_dlss() {
+     let Ok(to) = nvidia_home() else { return };
+@@ -476,7 +540,11 @@
+     if wants_fsr3 && fsr3.is_none() {
+         println!("No FSR 3 bridge: running without FSR 3 frame generation (`victory get-fsr3` builds it).");
+     }
+-    let (mut s, series_s) = settings(o, &menu, streamline.as_deref(), fsr3.as_deref());
++    let mfg = mfg_dir(&here);
++    if o.mfg && mfg.is_none() {
++        println!("No MFG Unlocker DLL: running without the unlock (`victory get-mfg` fetches it).");
++    }
++    let (mut s, series_s) = settings(o, &menu, streamline.as_deref(), fsr3.as_deref(), mfg.as_deref());
+     // Where the menu saves, and how it starts the title again (`--set` is not carried over).
+     let quoted = |p: &Path| format!("'{}'", p.to_string_lossy().replace('\'', "''"));
+     s.insert("VICTORY_MENU_FILE".to_owned(), menu_file.to_string_lossy().into_owned());
+@@ -484,10 +552,11 @@
+     s.insert(
+         "VICTORY_MENU_ARGS".to_owned(),
+         format!(
+-            "play {}{}{}",
++            "play {}{}{}{}",
+             quoted(&exe),
+             if o.no_framegen_ready { " --no-framegen-ready" } else { "" },
+-            if o.fsr3_framegen { " --fsr3-framegen" } else { "" }
++            if o.fsr3_framegen { " --fsr3-framegen" } else { "" },
++            if o.mfg { " --mfg" } else { "" }
+         ),
+     );
+     let log = log_file(&home.join("logs"))?;
+@@ -536,6 +605,7 @@
+             dlss: "quality".to_owned(),
+             framegen: None,
+             fsr3_framegen: false,
++            mfg: false,
+             no_framegen_ready: false,
+             fps: 1000,
+             more: Vec::new(),
+@@ -545,7 +615,7 @@
+     #[test]
+     fn a_plain_start_is_the_launchers() {
+         let dir = Path::new(r"C:\nvidia");
+-        let (s, series_s) = settings(&options(), &[], Some(dir), None);
++        let (s, series_s) = settings(&options(), &[], Some(dir), None, None);
+         assert!(!series_s);
+         for (k, v) in SETTINGS {
+             assert_eq!(s.get(*k).map(String::as_str), Some(*v), "{k}");
+@@ -564,7 +634,7 @@
+ 
+     #[test]
+     fn without_nvidias_files_there_is_no_dlss() {
+-        let (s, _) = settings(&options(), &[], None, None);
++        let (s, _) = settings(&options(), &[], None, None, None);
+         assert!(!s.contains_key("VICTORY_DLSS") && !s.contains_key("VICTORY_FRAMEGEN"));
+         assert!(!s.contains_key("VICTORY_TEXTURE_ROOM_PERCENT"));
+         assert_eq!(s.get("VICTORY_MENU_DLSS").map(String::as_str), Some("off"));
+@@ -577,7 +647,7 @@
+              VICTORY_MENU_DLSS=performance\r\nVICTORY_MENU_FPS=60\r\nVICTORY_BVH_BUILDER=\r\n\
+              VICTORY_AMBIENT=0.5\r\nVICTORY_EARLY_DEPTH=\r\nnot a setting=1\r\n",
+         );
+-        let (s, series_s) = settings(&options(), &menu, Some(Path::new("x")), None);
++        let (s, series_s) = settings(&options(), &menu, Some(Path::new("x")), None, None);
+         let get = |k: &str| s.get(k).map(String::as_str);
+         assert!(series_s);
+         // the Series S profile has no picture size of its own
+@@ -596,7 +666,7 @@
+         let mut o = options();
+         (o.res, o.dlss, o.framegen, o.fps) = ("1080to1440".to_owned(), "off".to_owned(), Some(4), 30);
+         o.more = vec!["VICTORY_AMBIENT=0".to_owned(), "VICTORY_NEW = 2".to_owned()];
+-        let (s, _) = settings(&o, &[], Some(Path::new("x")), None);
++        let (s, _) = settings(&o, &[], Some(Path::new("x")), None, None);
+         let get = |k: &str| s.get(k).map(String::as_str);
+         assert_eq!((get("VICTORY_RENDER_1080P"), get("VICTORY_NATIVE_1440P")), (Some("1"), None));
+         // no DLSS, so no frame generation either
+@@ -609,7 +679,7 @@
+     fn fsr3_framegen_without_streamline_runs_with_the_titles_own_upscaling() {
+         let mut o = options();
+         o.fsr3_framegen = true;
+-        let (s, _) = settings(&o, &[], None, Some(Path::new(r"C:\fsr3")));
++        let (s, _) = settings(&o, &[], None, Some(Path::new(r"C:\fsr3")), None);
+         let get = |k: &str| s.get(k).map(String::as_str);
+         assert_eq!(get("VICTORY_FSR3_FG"), Some("1"));
+         assert_eq!(get("VICTORY_FSR3_DIR"), Some(r"C:\fsr3"));
+@@ -624,7 +694,7 @@
+     fn fsr3_framegen_keeps_dlss_upscaling_but_not_dlss_framegen() {
+         let mut o = options();
+         o.fsr3_framegen = true;
+-        let (s, _) = settings(&o, &[], Some(Path::new("x")), Some(Path::new(r"C:\fsr3")));
++        let (s, _) = settings(&o, &[], Some(Path::new("x")), Some(Path::new(r"C:\fsr3")), None);
+         let get = |k: &str| s.get(k).map(String::as_str);
+         assert_eq!(get("VICTORY_FSR3_FG"), Some("1"));
+         assert_eq!(get("VICTORY_FSR3_DIR"), Some(r"C:\fsr3"));
+@@ -642,12 +712,37 @@
+         let mut o = options();
+         o.fsr3_framegen = true;
+         o.framegen = Some(2);
+-        let (s, _) = settings(&o, &[], Some(Path::new("x")), Some(Path::new(r"C:\fsr3")));
++        let (s, _) = settings(&o, &[], Some(Path::new("x")), Some(Path::new(r"C:\fsr3")), None);
+         let get = |k: &str| s.get(k).map(String::as_str);
+         assert_eq!((get("VICTORY_DLSS"), get("VICTORY_FRAMEGEN_X")), (Some("1"), Some("2")));
+         assert_eq!(get("VICTORY_FSR3_FG"), None);
+         assert_eq!(get("VICTORY_MENU_FSR3_FG"), Some("0"));
+     }
++
++    #[test]
++    fn mfg_turns_dlss_framegen_on() {
++        let mut o = options();
++        o.mfg = true;
++        let (s, _) = settings(&o, &[], Some(Path::new("x")), None, Some(Path::new(r"C:\mfg")));
++        let get = |k: &str| s.get(k).map(String::as_str);
++        assert_eq!(get("VICTORY_MFG"), Some("1"));
++        assert_eq!(get("VICTORY_MFG_DIR"), Some(r"C:\mfg"));
++        assert_eq!((get("VICTORY_FRAMEGEN"), get("VICTORY_FRAMEGEN_X")), (Some("1"), Some("2")));
++        assert_eq!(get("VICTORY_TEXTURE_ROOM_PERCENT"), Some("80"));
++    }
++
++    #[test]
++    fn mfg_wins_over_fsr3() {
++        let mut o = options();
++        o.mfg = true;
++        o.fsr3_framegen = true;
++        let (s, _) = settings(&o, &[], Some(Path::new("x")), Some(Path::new(r"C:\fsr3")), Some(Path::new(r"C:\mfg")));
++        let get = |k: &str| s.get(k).map(String::as_str);
++        assert_eq!(get("VICTORY_MFG"), Some("1"));
++        assert_eq!((get("VICTORY_FRAMEGEN"), get("VICTORY_FRAMEGEN_X")), (Some("1"), Some("2")));
++        assert_eq!(get("VICTORY_FSR3_FG"), None);
++        assert_eq!(get("VICTORY_MENU_FSR3_FG"), Some("0"));
++    }
+ 
+     #[test]
+     fn stamps_are_dates() {
+diff -ruN a/apps/victory/src/run.rs b/apps/victory/src/run.rs
+--- a/apps/victory/src/run.rs	2026-11-28 03:58:54.430879704 -0500
++++ b/apps/victory/src/run.rs	2026-11-28 03:58:54.434736564 -0500
+@@ -60,6 +60,13 @@
+     // is loaded before anything of the title or the host GPU, and fails soft;
+     // only if it offers one of them does the title render through its
+     // FidelityFX path, which DLSS takes over (`native_1440p::prepare_upscaler`).
++    // MFG Unlocker (`VICTORY_MFG`): the released MFGUnlocker.dll, loaded
++    // before Streamline so its loader hooks patch the DLSS-G provider
++    // (Ada 0x190 -> Ampere 0x170, and the >2x count gate) when Streamline
++    // loads it. Fails soft; without it DLSS frame generation stays as
++    // Streamline reports it (not available on RTX 30).
++    let mfg_asked = victory_hle::mfg::Asked::from_env().map_err(anyhow::Error::msg)?;
++    let mfg_loaded = victory_hle::mfg::init(&mfg_asked);
+     let asked = victory_hle::streamline::Asked::from_env().map_err(anyhow::Error::msg)?;
+     let available = victory_hle::streamline::init(&asked);
+     // FSR 3 frame generation (`VICTORY_FSR3_FG=1`): the bridge is loaded
+@@ -108,6 +115,16 @@
+             upscaler.map(|m| format!(", scene at the {} scale ({})", m.name(), m.scale())).unwrap_or_default()
+         );
+     }
++    if mfg_asked.enabled {
++        println!(
++            "frame generation MFG Unlocker {}",
++            if mfg_loaded {
++                "loaded: DLSS frame generation unlocked for this GPU (see RTXMFG-*.log beside this program)"
++            } else {
++                "asked, not loaded"
++            }
++        );
++    }
+     let original = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
+     let mut prepared = victory_loader::prepare(&original)?;
+     let hash = prepared.original_hash.to_hex();
+diff -ruN a/crates/victory-gpu/src/fsr3.rs b/crates/victory-gpu/src/fsr3.rs
+--- a/crates/victory-gpu/src/fsr3.rs	2026-11-28 03:58:54.430460656 -0500
++++ b/crates/victory-gpu/src/fsr3.rs	2026-11-28 03:58:54.434188804 -0500
+@@ -402,15 +402,18 @@
+     // Mutual exclusion with DLSS frame generation: two proxy swap
+     // chains cannot both own the present. DLSS was initialised first
+     // (run.rs); if its frame generation is live, FSR 3 stays off.
+-    // DLSS upscaling alone does not block FSR 3: on this machine
+-    // (RTX 3080 Ti) DLSS frame generation is not available at all,
+-    // so DLSS upscaling + FSR 3 frame generation is the combination
+-    // that runs at 1440p. (streamline::serving() is the wrong check
+-    // here: it is true whenever DLSS upscaling serves, even with no
+-    // frame generation — the control run proved it.)
+-    if streamline::framegen_live() {
++    // The MFG Unlocker is initialised before Streamline in run.rs, so
++    // when it is loaded DLSS frame generation is the path in use even
++    // before Streamline reports it. DLSS upscaling alone does not
++    // block FSR 3: on this machine (RTX 3080 Ti) DLSS frame generation
++    // is not available at all, so DLSS upscaling + FSR 3 frame
++    // generation is the combination that runs at 1440p.
++    // (streamline::serving() is the wrong check here: it is true
++    // whenever DLSS upscaling serves, even with no frame generation —
++    // the control run proved it.)
++    if streamline::framegen_live() || crate::mfg::loaded() {
+         tracing::warn!(
+-            "FSR 3 frame generation and DLSS frame generation were both asked for: DLSS frame generation wins, FSR 3 stays off (set only one of VICTORY_FRAMEGEN / VICTORY_FSR3_FG)"
++            "FSR 3 frame generation and DLSS frame generation were both asked for: DLSS frame generation wins, FSR 3 stays off (set only one of VICTORY_FRAMEGEN / VICTORY_FSR3_FG / VICTORY_MFG)"
+         );
+         return Available::default();
+     }
+diff -ruN a/crates/victory-gpu/src/lib.rs b/crates/victory-gpu/src/lib.rs
+--- a/crates/victory-gpu/src/lib.rs	2026-11-28 03:58:54.430245634 -0500
++++ b/crates/victory-gpu/src/lib.rs	2026-11-28 03:58:54.433553171 -0500
+@@ -90,6 +90,10 @@
+ pub mod streamline;
+ #[cfg(windows)]
+ pub mod fsr3;
++/// MFG Unlocker (`VICTORY_MFG`), unlocking DLSS frame generation on
++/// RTX 30-series through the released MFGUnlocker.dll.
++#[cfg(windows)]
++pub mod mfg;
+ mod switch;
+ #[cfg(all(windows, feature = "diagnostics"))]
+ mod ab;
+diff -ruN a/crates/victory-gpu/src/mfg.rs b/crates/victory-gpu/src/mfg.rs
+--- a/crates/victory-gpu/src/mfg.rs	1969-12-31 19:00:00.000000000 -0500
++++ b/crates/victory-gpu/src/mfg.rs	2026-11-28 03:58:54.431935807 -0500
+@@ -0,0 +1,182 @@
++//! DLSS Multi Frame Generation unlocked on RTX 30-series (and 20-series)
++//! through the released MFG Unlocker DLL (dashdogy/MFG-Unlocker, v1.7.2,
++//! MIT), for GPUs Streamline's DLSS Frame Generation refuses.
++//!
++//! - `VICTORY_MFG=1`: load `MFGUnlocker.dll` before Streamline is loaded.
++//!   Its DllMain arms the unlock; when Streamline then loads its DLSS-G
++//!   provider (`sl.dlss_g.dll` / `nvngx_dlssg.dll`), the Unlocker patches
++//!   the provider in memory only — no file, driver or Streamline code is
++//!   changed:
++//!   - the provider's minimum GPU architecture, declared as Ada (0x190)
++//!     in `NVSDK_NGX_GetGPUArchitecture` and in
++//!     `NVSDK_NGX_D3D12_GetFeatureRequirements` (frame-generation feature
++//!     0x0B), is rewritten to Ampere (0x170) / Turing (0x160), so NGX and
++//!     Streamline admit the card;
++//!   - the provider's count/index gate is patched so more than one frame
++//!     can be generated per rendered frame (up to 6x shown);
++//!   - the provider's frame-generation programs are supplied for SM86
++//!     (Ampere) from the Unlocker's own prebuilt kernel cache.
++//! - `VICTORY_MFG_DIR`: the folder of `MFGUnlocker.dll` (default: the
++//!   `mfg` folder beside this program, then `%LOCALAPPDATA%\victory\mfg`,
++//!   then `mfg` under the current folder). `Get-MFG.cmd` / `victory
++//!   get-mfg` fetches the author's release there.
++//!
++//! Why the released DLL, and not a port of the Unlocker's source: the
++//! source alone cannot reproduce it. Its build needs separately prepared
++//! inputs that are not in its tree — the SM86 kernel cache and the XeSS
++//! program set (see its BUILD.md) — so a port would be a reimplementation
++//! of NVIDIA's frame-generation programs, not an integration. The DLL is
++//! the author's own release, fetched by the user from the author's GitHub
++//! and SHA-256-checked by `Get-MFG.cmd`; it is never part of this
++//! repository, the same as NVIDIA's and AMD's files.
++//!
++//! Anything missing (the DLL, the switch) leaves DLSS frame generation
++//! exactly as Streamline reports it — on an RTX 3080 Ti, not available —
++//! with a warning in the log. The Unlocker and FSR 3 frame generation
++//! are mutually exclusive: never both proxy swap chains (see
++//! `fsr3::init`, which refuses FSR 3 when this is loaded, and the
++//! launchers, which never ask for both).
++//!
++//! What it does not do: it shows more frames per rendered frame; it does
++//! not render faster. The submitting thread still waits on the GPU work
++//! (the 2026-11-28 logs: waiting for flights / for the card dominates at
++//! ~127ms a frame), so the rendered rate stays where it was and only
++//! the shown rate rises. 2x is the likely win; 3x-6x depends on the
++//! count-gate patch landing for the exact DLSS-G provider version
++//! Streamline 2.14.16 ships — the Unlocker's log beside this program
++//! (`RTXMFG-*.log`) says which provider it saw and what it patched.
++//! Its Backspace menu is a bonus, not the unlock: it hooks the present
++//! for its overlay, and this title presents through Streamline's proxy,
++//! so the menu may not appear here. The unlock does not need it.
++
++#![allow(clippy::not_unsafe_ptr_arg_deref)]
++
++use std::path::{Path, PathBuf};
++use std::sync::OnceLock;
++
++use windows_sys::Win32::System::LibraryLoader::{
++    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
++};
++
++/// The released DLL, fetched by `Get-MFG.cmd` / `victory get-mfg`.
++/// Never committed to the repository.
++pub const MFG_DLL: &str = "MFGUnlocker.dll";
++/// The pinned release. `Get-MFG.cmd` checks both hashes.
++pub const MFG_VERSION: &str = "1.7.2";
++/// SHA-256 of `MFGUnlocker-v1.7.2.zip`, from the release's SHA256SUMS.txt.
++pub const MFG_ZIP_SHA256: &str = "E002D624E3E7BA5CEDAB7211043C096FE8F555C30FF43500235A0686C7893F22";
++/// SHA-256 of the `MFGUnlocker.dll` inside it.
++pub const MFG_DLL_SHA256: &str = "A9B1C01727FA72763BEF8F604E44EC165CE1C98272DE00719572B766A11CF28F";
++
++/// What the user asked for, read from the environment once.
++#[derive(Clone, Debug)]
++pub struct Asked {
++    pub enabled: bool,
++    pub dir: PathBuf,
++}
++
++impl Asked {
++    pub fn from_env() -> Result<Self, String> {
++        let var = |name: &str| std::env::var(name).ok();
++        let on = |name: &str| var(name).is_some_and(|v| v.trim() == "1");
++        Ok(Asked {
++            enabled: on("VICTORY_MFG"),
++            dir: var("VICTORY_MFG_DIR").map(PathBuf::from).unwrap_or_else(default_dir),
++        })
++    }
++
++    pub fn any(&self) -> bool {
++        self.enabled
++    }
++}
++
++/// Where the DLL is looked for without `VICTORY_MFG_DIR`: the `mfg`
++/// folder beside this program (what `Get-MFG.cmd` and `victory get-mfg`
++/// populate), then `%LOCALAPPDATA%\victory\mfg`, then `mfg` under the
++/// current folder. The first that exists wins; otherwise the first
++/// candidate, so the error names a real place.
++fn default_dir() -> PathBuf {
++    let mut candidates = Vec::new();
++    if let Ok(exe) = std::env::current_exe() {
++        if let Some(dir) = exe.parent() {
++            candidates.push(dir.join("mfg"));
++        }
++    }
++    if let Ok(local) = std::env::var("LOCALAPPDATA") {
++        candidates.push(PathBuf::from(local).join("victory").join("mfg"));
++    }
++    candidates.push(PathBuf::from("mfg"));
++    for c in &candidates {
++        if c.join(MFG_DLL).is_file() {
++            return c.clone();
++        }
++    }
++    candidates.into_iter().next().unwrap_or_else(|| PathBuf::from("mfg"))
++}
++
++struct Library(windows_sys::Win32::Foundation::HMODULE);
++
++// The handle is never freed: the DLL pins itself in DllMain and its
++// loader hooks must live for the process. Freeing it mid-game would
++// drop the patch while Streamline still serves frame generation.
++unsafe impl Send for Library {}
++unsafe impl Sync for Library {}
++
++static LOADED: OnceLock<Library> = OnceLock::new();
++
++fn wide(path: &Path) -> Vec<u16> {
++    use std::os::windows::ffi::OsStrExt;
++    path.as_os_str().encode_wide().chain([0]).collect()
++}
++
++/// Load the Unlocker before Streamline is loaded (call from `run.rs`,
++/// before `streamline::init`). Its DllMain arms the backend; the patch
++/// itself lands when Streamline loads the DLSS-G provider. Fails soft.
++pub fn init(asked: &Asked) -> bool {
++    if !asked.enabled {
++        return false;
++    }
++    let path = match std::path::absolute(asked.dir.join(MFG_DLL)) {
++        Ok(p) => p,
++        Err(e) => {
++            tracing::warn!("MFG Unlocker: {e}; DLSS frame generation stays as Streamline reports it");
++            return false;
++        }
++    };
++    if !path.is_file() {
++        tracing::warn!(
++            folder = %asked.dir.display(),
++            "MFG Unlocker: no {MFG_DLL} in that folder (VICTORY_MFG_DIR); run Get-MFG.cmd to fetch v{MFG_VERSION}. DLSS frame generation stays as Streamline reports it"
++        );
++        return false;
++    }
++    let file = wide(&path);
++    // Its own folder and System32 only, never the current folder.
++    // SAFETY: a NUL-terminated full path.
++    let module = unsafe {
++        LoadLibraryExW(
++            file.as_ptr(),
++            std::ptr::null_mut(),
++            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
++        )
++    };
++    if module.is_null() {
++        tracing::warn!(
++            "MFG Unlocker: {MFG_DLL} did not load ({}); DLSS frame generation stays as Streamline reports it",
++            std::io::Error::last_os_error()
++        );
++        return false;
++    }
++    let _ = LOADED.set(Library(module));
++    tracing::info!(
++        folder = %asked.dir.display(),
++        version = MFG_VERSION,
++        "MFG Unlocker loaded: DLSS Frame Generation is unlocked for this GPU when Streamline loads its provider (see RTXMFG-*.log beside this program for what it patched)"
++    );
++    true
++}
++
++/// Whether the Unlocker is loaded in this process.
++pub fn loaded() -> bool {
++    LOADED.get().is_some()
++}
+diff -ruN a/crates/victory-hle/src/lib.rs b/crates/victory-hle/src/lib.rs
+--- a/crates/victory-hle/src/lib.rs	2026-11-28 03:58:54.430708999 -0500
++++ b/crates/victory-hle/src/lib.rs	2026-11-28 03:58:54.433628904 -0500
+@@ -31,6 +31,10 @@
+ /// frame generation.
+ #[cfg(windows)]
+ pub use victory_gpu::fsr3;
++/// MFG Unlocker (`VICTORY_MFG`), unlocking DLSS frame generation on
++/// RTX 30-series through the released MFGUnlocker.dll.
++#[cfg(windows)]
++pub use victory_gpu::mfg;
+ #[cfg(all(windows, feature = "diagnostics"))]
+ pub use victory_gpu::replay;
+ 
+diff -ruN a/scripts/get-mfg.ps1 b/scripts/get-mfg.ps1
+--- a/scripts/get-mfg.ps1	1969-12-31 19:00:00.000000000 -0500
++++ b/scripts/get-mfg.ps1	2026-11-28 03:58:54.432429207 -0500
+@@ -0,0 +1,88 @@
++# Fetches the released MFG Unlocker (dashdogy/MFG-Unlocker, MIT) and puts
++# MFGUnlocker.dll into mfg\ here (git-ignored), where
++# scripts\play-foxhound.ps1 and `victory play` look for it. The DLL is
++# the author's own release, under the author's licence; this repository
++# does not and may not carry it, so each person gets it from the author
++# directly. Get-MFG.cmd in the repository's folder runs this.
++# Nothing of the Unlocker's is needed to build the layer: the DLL is
++# loaded when the game runs, before Streamline, and patches the DLSS-G
++# provider in memory only.
++#
++# v1.7.2 is the pinned version. Both hashes below come from the
++# release's own SHA256SUMS.txt; the download fails loudly here rather
++# than silently installing a different file. To bump the version, change
++# $Version and both hashes from the new release's SHA256SUMS.txt.
++$Version = '1.7.2'
++$ZipSha256 = 'E002D624E3E7BA5CEDAB7211043C096FE8F555C30FF43500235A0686C7893F22'
++$DllSha256 = 'A9B1C01727FA72763BEF8F604E44EC165CE1C98272DE00719572B766A11CF28F'
++param(
++    # Another folder for the DLL than mfg here (`victory get-mfg`
++    # names one under %LOCALAPPDATA%\victory).
++    [string]$InstallDir = ''
++)
++# The cmdlets this script uses (Join-Path, Test-Path, ...) come from
++# Microsoft.PowerShell.Management. A session with module auto-loading
++# off does not have them, and the script then fails on its first line
++# ("Join-Path is not recognized") - as happened when it was run from
++# inside another PowerShell window. Load the module explicitly, from
++# its usual places if the module path itself is broken.
++if (-not (Get-Command Join-Path -ErrorAction SilentlyContinue)) {
++    Import-Module Microsoft.PowerShell.Management -ErrorAction SilentlyContinue
++}
++if (-not (Get-Command Join-Path -ErrorAction SilentlyContinue)) {
++    foreach ($base in @("$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules", "$PSHOME\Modules")) {
++        $psd1 = [System.IO.Path]::Combine($base, 'Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Management.psd1')
++        if ([System.IO.File]::Exists($psd1)) { Import-Module $psd1 -ErrorAction Stop; break }
++    }
++}
++$ErrorActionPreference = 'Stop'
++$ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest's progress bar makes it many times slower
++[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
++$repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
++$install = if ($InstallDir) { $InstallDir } else { Join-Path $repo 'mfg' }
++New-Item -ItemType Directory -Force $install | Out-Null
++
++# One file from a URL, with curl's progress line where Windows has curl (it has since Windows 10 1803).
++function Get-File([string]$Url, [string]$To) {
++    New-Item -ItemType Directory -Force (Split-Path $To) | Out-Null
++    $part = "$To.part"
++    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
++        & curl.exe --location --fail --silent --show-error --progress-bar --output $part $Url
++        if ($LASTEXITCODE -ne 0) { Remove-Item $part -ErrorAction SilentlyContinue; throw "could not get $Url" }
++    } else {
++        Invoke-WebRequest -Uri $Url -OutFile $part -UseBasicParsing -ErrorAction Stop
++    }
++    Move-Item $part $To -Force
++}
++
++Write-Host "MFG Unlocker v$Version, from github.com/dashdogy/MFG-Unlocker/releases:"
++$url = "https://github.com/dashdogy/MFG-Unlocker/releases/download/v$Version/MFGUnlocker-v$Version.zip"
++$zip = Join-Path $install "MFGUnlocker-v$Version.zip"
++try { Get-File $url $zip } catch {
++    throw "Could not download MFG Unlocker v$Version from $url. Check the version exists (v1.7.2 is the pinned one): $($_.Exception.Message)"
++}
++$hash = (Get-FileHash $zip -Algorithm SHA256).Hash
++if ($hash -ne $ZipSha256) { Remove-Item $zip -Force; throw "MFGUnlocker-v$Version.zip has SHA-256 $hash, not the pinned $ZipSha256. Not installing it." }
++# The zip holds one file, MFGUnlocker.dll. Not Expand-Archive -Force: that calls the 3-argument
++# ExtractToDirectory, which an older .NET Framework does not have
++# ("Cannot find an overload ... argument count: 3"). The
++# 2-argument form has existed since .NET 4.5, and the folder was
++# just removed below, so nothing needs overwriting.
++$scratch = Join-Path $install 'zip-src'
++Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
++Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
++[System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $scratch)
++Remove-Item $zip -Force
++$dll = Get-ChildItem $scratch -Filter 'MFGUnlocker.dll' | Select-Object -First 1
++if (-not $dll) { throw "No MFGUnlocker.dll in MFGUnlocker-v$Version.zip; that is not the MFG Unlocker release." }
++$dllHash = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash
++if ($dllHash -ne $DllSha256) { throw "MFGUnlocker.dll inside the zip has SHA-256 $dllHash, not the pinned $DllSha256. Not installing it." }
++Copy-Item $dll.FullName (Join-Path $install 'MFGUnlocker.dll') -Force
++Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
++
++$missing = @('MFGUnlocker.dll') | Where-Object { -not (Test-Path (Join-Path $install $_)) }
++if ($missing) { throw "Not there after all: $($missing -join ', ')" }
++Write-Host ''
++Write-Host "Done. In $install : MFGUnlocker.dll (v$Version)."
++Write-Host 'Next: .\scripts\play-foxhound.ps1 -Exe <path of your own copy''s executable> -Mfg'
++Write-Host '  (or: victory play --mfg). DLSS frame generation unlocked on RTX 30-series, 2x to 6x shown per rendered frame.'
+diff -ruN a/scripts/play-foxhound.ps1 b/scripts/play-foxhound.ps1
+--- a/scripts/play-foxhound.ps1	2026-11-28 03:58:54.431393845 -0500
++++ b/scripts/play-foxhound.ps1	2026-11-28 03:58:54.435886277 -0500
+@@ -6,6 +6,8 @@
+ #   .\scripts\play-foxhound.ps1 -Exe ... -Dlss balanced -FrameGen
+ #   .\scripts\play-foxhound.ps1 -Exe ... -Fsr3FrameGen       FSR 3 frame generation, 2x (RTX 30-series, e.g. 3080 Ti:
+ #                                                      DLSS frame generation needs an RTX 40 or later)
++#   .\scripts\play-foxhound.ps1 -Exe ... -Mfg               DLSS frame generation unlocked on RTX 30-series
++#                                                      (MFG Unlocker v1.7.2; run Get-MFG.cmd once first)
+ #   .\scripts\play-foxhound.ps1 -Exe ... -SeriesS             Series S profile (1280x720 inside, faster, softer)
+ #   .\scripts\play-foxhound.ps1 -Exe ... -Build diag          diagnostics build (slower; captures, timelines)
+ #   .\scripts\play-foxhound.ps1 -Exe ... -More @{VICTORY_AMBIENT_SPECULAR='0'}   add or override switches
+@@ -32,6 +34,11 @@
+     # out at most). Never together with -FrameGen: one frame-generation swap chain at a time. Needs the bridge
+     # built by Get-FSR3.cmd (fsr3-sdk\fsr3_bridge.dll + AMD's amd_fidelityfx_dx12.dll).
+     [switch]$Fsr3FrameGen,
++    # DLSS Frame Generation unlocked on RTX 30-series (MFG Unlocker v1.7.2): DLSS frame generation on from
++    # the start, at -FrameGenX (2 unless set). Never together with -Fsr3FrameGen: one frame-generation swap
++    # chain at a time. Needs the DLL fetched by Get-MFG.cmd (mfg\MFGUnlocker.dll). Without it this is just
++    # -FrameGen, which Streamline refuses on RTX 30.
++    [switch]$Mfg,
+     # Frames shown for each one rendered with -FrameGen: 2 to 6 (more than 2 needs an RTX 50; the layer asks the
+     # driver how many this card does and gives no more).
+     [ValidateRange(2, 6)][int]$FrameGenX = 2,
+@@ -66,6 +73,7 @@
+ # FSR 3 frame generation: the F1 menu's VICTORY_MENU_FSR3_FG (2: on, 0: off) stands in for -Fsr3FrameGen.
+ $fsr3Wanted = $Fsr3FrameGen
+ if ($menu.Contains('VICTORY_MENU_FSR3_FG')) { $fsr3Wanted = $menu['VICTORY_MENU_FSR3_FG'] -eq '2' }
++if ($Mfg) { $FrameGen = $true }
+ if ($fsr3Wanted -and $FrameGen) {
+     Write-Host "Both DLSS frame generation and FSR 3 frame generation were asked for: DLSS wins, FSR 3 off."
+     $fsr3Wanted = $false
+@@ -125,6 +133,17 @@
+         $settings.VICTORY_DLSS = '1'; $settings.VICTORY_DLSS_MODE = $Dlss; $settings.VICTORY_STREAMLINE_DIR = $sl
+         if ($FrameGen) { $settings.VICTORY_FRAMEGEN = '1'; $settings.VICTORY_FRAMEGEN_X = [string]$timesWanted }
+         elseif (-not $NoFrameGenReady) { $settings.VICTORY_FRAMEGEN = '1'; $settings.VICTORY_FRAMEGEN_X = '0' }   # ready, off
++        if ($Mfg) {
++            # The Unlocker: where VICTORY_MFG_DIR says, else where Get-MFG.cmd puts it.
++            $mfgdir = if ($env:VICTORY_MFG_DIR) { $env:VICTORY_MFG_DIR } else { Join-Path $repo 'mfg' }
++            if (Test-Path (Join-Path $mfgdir 'MFGUnlocker.dll')) {
++                $settings.VICTORY_MFG = '1'; $settings.VICTORY_MFG_DIR = $mfgdir
++            } else {
++                Write-Host "No MFGUnlocker.dll in ${mfgdir}: running without the unlock (DLSS frame generation stays as"
++                Write-Host "Streamline reports it — not available on RTX 30). Get-MFG.cmd in the repository folder fetches it once;"
++                Write-Host "VICTORY_MFG_DIR names another folder."
++            }
++        }
+         # Frame generation takes 1.5 to 2 GB of the card's memory, which the layer otherwise fills with textures up
+         # to nine tenths of its budget (on a 12 GB card it then ran out: no generated frames). On from the start, it
+         # is left a fifth of the budget; ready but off, a little less is held back. FSR 3 frame generation already
+@@ -152,7 +171,7 @@
+ $settings.VICTORY_MENU_FPS = [string]$fpsWanted
+ $settings.VICTORY_MENU_FILE = $menuFile
+ $settings.VICTORY_MENU_PLAY = $MyInvocation.MyCommand.Path
+-$settings.VICTORY_MENU_ARGS = "-Exe '$($Exe -replace "'", "''")' -Build $Build$(if ($NoFrameGenReady) { ' -NoFrameGenReady' })$(if ($fsr3Wanted) { ' -Fsr3FrameGen' })"
++$settings.VICTORY_MENU_ARGS = "-Exe '$($Exe -replace "'", "''")' -Build $Build$(if ($NoFrameGenReady) { ' -NoFrameGenReady' })$(if ($fsr3Wanted) { ' -Fsr3FrameGen' })$(if ($Mfg) { ' -Mfg' })"
+ 
+ $victory = Join-Path $repo "target\$Build\victory.exe"
+ if (-not (Test-Path $victory)) {
+@@ -168,7 +187,7 @@
+ }
+ if (-not (Test-Path -LiteralPath $Exe)) { Write-Host "No $Exe."; return }
+ # Switches left over in this window are cleared; path settings stay (victory.toml gives them otherwise).
+-$paths = 'VICTORY_CONFIG', 'VICTORY_GAME_DIR', 'VICTORY_CACHE_DIR', 'VICTORY_DATA_DIR', 'VICTORY_STREAMLINE_DIR', 'VICTORY_FSR3_DIR'
++$paths = 'VICTORY_CONFIG', 'VICTORY_GAME_DIR', 'VICTORY_CACHE_DIR', 'VICTORY_DATA_DIR', 'VICTORY_STREAMLINE_DIR', 'VICTORY_FSR3_DIR', 'VICTORY_MFG_DIR'
+ Get-ChildItem Env:VICTORY_* -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin $paths } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
+ foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
+ 

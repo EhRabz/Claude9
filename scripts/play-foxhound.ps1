@@ -6,6 +6,8 @@
 #   .\scripts\play-foxhound.ps1 -Exe ... -Dlss balanced -FrameGen
 #   .\scripts\play-foxhound.ps1 -Exe ... -Fsr3FrameGen       FSR 3 frame generation, 2x (RTX 30-series, e.g. 3080 Ti:
 #                                                      DLSS frame generation needs an RTX 40 or later)
+#   .\scripts\play-foxhound.ps1 -Exe ... -Mfg               DLSS frame generation unlocked on RTX 30-series
+#                                                      (MFG Unlocker v1.7.2; run Get-MFG.cmd once first)
 #   .\scripts\play-foxhound.ps1 -Exe ... -SeriesS             Series S profile (1280x720 inside, faster, softer)
 #   .\scripts\play-foxhound.ps1 -Exe ... -Build diag          diagnostics build (slower; captures, timelines)
 #   .\scripts\play-foxhound.ps1 -Exe ... -More @{VICTORY_AMBIENT_SPECULAR='0'}   add or override switches
@@ -28,10 +30,15 @@ param(
     # DLSS Frame Generation (RTX 40 or later, hardware-accelerated GPU scheduling on); needs DLSS.
     [switch]$FrameGen,
     # FSR 3 Frame Generation, 2x (RTX 30-series and most other GPUs; DLSS upscaling stays on, only DLSS frame
-    # generation stays off — the title's own upscaling cannot run at 1440p, its shipping FSR4 takes 1920x1080
+    # generation stays off - the title's own upscaling cannot run at 1440p, its shipping FSR4 takes 1920x1080
     # out at most). Never together with -FrameGen: one frame-generation swap chain at a time. Needs the bridge
     # built by Get-FSR3.cmd (fsr3-sdk\fsr3_bridge.dll + AMD's amd_fidelityfx_dx12.dll).
     [switch]$Fsr3FrameGen,
+    # DLSS Frame Generation unlocked on RTX 30-series (MFG Unlocker v1.7.2): DLSS frame generation on from
+    # the start, at -FrameGenX (2 unless set). Never together with -Fsr3FrameGen: one frame-generation swap
+    # chain at a time. Needs the DLL fetched by Get-MFG.cmd (mfg\MFGUnlocker.dll). Without it this is just
+    # -FrameGen, which Streamline refuses on RTX 30.
+    [switch]$Mfg,
     # Frames shown for each one rendered with -FrameGen: 2 to 6 (more than 2 needs an RTX 50; the layer asks the
     # driver how many this card does and gives no more).
     [ValidateRange(2, 6)][int]$FrameGenX = 2,
@@ -66,6 +73,7 @@ if ($menu.Contains('VICTORY_MENU_FRAMEGEN')) {
 # FSR 3 frame generation: the F1 menu's VICTORY_MENU_FSR3_FG (2: on, 0: off) stands in for -Fsr3FrameGen.
 $fsr3Wanted = $Fsr3FrameGen
 if ($menu.Contains('VICTORY_MENU_FSR3_FG')) { $fsr3Wanted = $menu['VICTORY_MENU_FSR3_FG'] -eq '2' }
+if ($Mfg) { $FrameGen = $true }
 if ($fsr3Wanted -and $FrameGen) {
     Write-Host "Both DLSS frame generation and FSR 3 frame generation were asked for: DLSS wins, FSR 3 off."
     $fsr3Wanted = $false
@@ -125,6 +133,17 @@ if ($Dlss -ne 'off') {
         $settings.VICTORY_DLSS = '1'; $settings.VICTORY_DLSS_MODE = $Dlss; $settings.VICTORY_STREAMLINE_DIR = $sl
         if ($FrameGen) { $settings.VICTORY_FRAMEGEN = '1'; $settings.VICTORY_FRAMEGEN_X = [string]$timesWanted }
         elseif (-not $NoFrameGenReady) { $settings.VICTORY_FRAMEGEN = '1'; $settings.VICTORY_FRAMEGEN_X = '0' }   # ready, off
+        if ($Mfg) {
+            # The Unlocker: where VICTORY_MFG_DIR says, else where Get-MFG.cmd puts it.
+            $mfgdir = if ($env:VICTORY_MFG_DIR) { $env:VICTORY_MFG_DIR } else { Join-Path $repo 'mfg' }
+            if (Test-Path (Join-Path $mfgdir 'MFGUnlocker.dll')) {
+                $settings.VICTORY_MFG = '1'; $settings.VICTORY_MFG_DIR = $mfgdir
+            } else {
+                Write-Host "No MFGUnlocker.dll in ${mfgdir}: running without the unlock (DLSS frame generation stays as"
+                Write-Host "Streamline reports it - not available on RTX 30). Get-MFG.cmd in the repository folder fetches it once;"
+                Write-Host "VICTORY_MFG_DIR names another folder."
+            }
+        }
         # Frame generation takes 1.5 to 2 GB of the card's memory, which the layer otherwise fills with textures up
         # to nine tenths of its budget (on a 12 GB card it then ran out: no generated frames). On from the start, it
         # is left a fifth of the budget; ready but off, a little less is held back. FSR 3 frame generation already
@@ -152,7 +171,7 @@ $settings.VICTORY_MENU_FSR3_FG = if ($settings.VICTORY_FSR3_FG -eq '1') { '2' } 
 $settings.VICTORY_MENU_FPS = [string]$fpsWanted
 $settings.VICTORY_MENU_FILE = $menuFile
 $settings.VICTORY_MENU_PLAY = $MyInvocation.MyCommand.Path
-$settings.VICTORY_MENU_ARGS = "-Exe '$($Exe -replace "'", "''")' -Build $Build$(if ($NoFrameGenReady) { ' -NoFrameGenReady' })$(if ($fsr3Wanted) { ' -Fsr3FrameGen' })"
+$settings.VICTORY_MENU_ARGS = "-Exe '$($Exe -replace "'", "''")' -Build $Build$(if ($NoFrameGenReady) { ' -NoFrameGenReady' })$(if ($fsr3Wanted) { ' -Fsr3FrameGen' })$(if ($Mfg) { ' -Mfg' })"
 
 $victory = Join-Path $repo "target\$Build\victory.exe"
 if (-not (Test-Path $victory)) {
@@ -168,7 +187,7 @@ if (-not (Test-Path $victory)) {
 }
 if (-not (Test-Path -LiteralPath $Exe)) { Write-Host "No $Exe."; return }
 # Switches left over in this window are cleared; path settings stay (victory.toml gives them otherwise).
-$paths = 'VICTORY_CONFIG', 'VICTORY_GAME_DIR', 'VICTORY_CACHE_DIR', 'VICTORY_DATA_DIR', 'VICTORY_STREAMLINE_DIR', 'VICTORY_FSR3_DIR'
+$paths = 'VICTORY_CONFIG', 'VICTORY_GAME_DIR', 'VICTORY_CACHE_DIR', 'VICTORY_DATA_DIR', 'VICTORY_STREAMLINE_DIR', 'VICTORY_FSR3_DIR', 'VICTORY_MFG_DIR'
 Get-ChildItem Env:VICTORY_* -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin $paths } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
 foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
 
