@@ -1,26 +1,31 @@
 # Fetches AMD's FidelityFX SDK, builds FSR 3's bridge (tools\fsr3-bridge)
-# against it, and puts fsr3_bridge.dll with AMD's amd_fidelityfx_dx12.dll
-# into fsr3-sdk\ here (git-ignored), where scripts\play-foxhound.ps1 and
-# `victory play` look for them. AMD's files are under AMD's licences
-# (saved beside them: read them); this repository does not and may not
-# carry them, so each person gets them from AMD directly. Get-FSR3.cmd in
-# the repository's folder runs this. Nothing of AMD's is needed to build
-# the layer: the bridge is loaded when the game runs, and the bridge in
-# turn loads AMD's DLL from its own folder.
+# against it, and puts fsr3_bridge.dll with AMD's loader and
+# framegeneration DLLs into fsr3-sdk\ here (git-ignored), where
+# scripts\play-foxhound.ps1 and `victory play` look for them. AMD's
+# files are under AMD's licences (saved beside them: read them); this
+# repository does not and may not carry them, so each person gets them
+# from AMD directly. Get-FSR3.cmd in the repository's folder runs this.
+# Nothing of AMD's is needed to build the layer: the bridge is loaded
+# when the game runs, and the bridge in turn loads AMD's DLLs from its
+# own folder.
 #
-# SDK 1.1.4 is the pinned version: FSR 3.1, the single-DLL FidelityFX API
-# (amd_fidelityfx_dx12.dll, five ffx* functions). A later SDK (2.0 and up)
-# splits the API into several DLLs and is NOT what the bridge expects:
-# if -SdkTag names one of those, the build step below fails and says so.
-# If the tag does not exist on GitHub, the download fails loudly here
-# rather than silently producing a half-built folder.
+# SDK 2.3.0 is the pinned version: FSR 3.1.6 / 3.1.7, the split-DLL
+# FidelityFX API. The loader (amd_fidelityfx_loader_dx12.dll) exposes
+# the five ffx* functions; the framegeneration DLL
+# (amd_fidelityfx_framegeneration_dx12.dll) beside it holds the
+# providers. SDK 1.1.4 is NOT used: its 1.1.3 swap-chain provider
+# cannot create a context on this machine (proven standalone — the
+# wrap fails code 3 by every method), while 2.3.0's 3.1.7 provider
+# wraps fine. If the tag does not exist on GitHub, the download
+# fails loudly here rather than silently producing a half-built
+# folder.
 param(
-    [string]$SdkTag = 'v1.1.4',
+    [string]$SdkTag = 'v2.3.0',
     # Another folder for the DLLs than fsr3-sdk here (`victory get-fsr3`
     # names one under %LOCALAPPDATA%\victory).
     [string]$InstallDir = '',
     # A FidelityFX SDK checkout already on this PC, instead of downloading
-    # the archive (its folder must contain ffx-api\include).
+    # the archive (its folder must contain Kits\FidelityFX).
     [string]$SdkDir = '',
     # The bridge's sources (tools\fsr3-bridge), when they are not beside
     # this script in the repository (`victory get-fsr3` writes them out).
@@ -68,7 +73,7 @@ if ($SdkDir) {
     $url = "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/archive/refs/tags/$SdkTag.zip"
     $zip = Join-Path $install "fidelityfx-sdk-$SdkTag.zip"
     try { Get-File $url $zip } catch {
-        throw "Could not download the FidelityFX SDK tag $SdkTag from $url. Check the tag exists (SDK 1.1.4 is the pinned one; -SdkTag names another): $($_.Exception.Message)"
+        throw "Could not download the FidelityFX SDK tag $SdkTag from $url. Check the tag exists (SDK 2.3.0 is the pinned one; -SdkTag names another): $($_.Exception.Message)"
     }
     $scratch = Join-Path $install 'sdk-src'
     Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
@@ -80,19 +85,22 @@ if ($SdkDir) {
     Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
     [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $scratch)
     Remove-Item $zip -Force
-    $sdk = Get-ChildItem $scratch -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'ffx-api') } | Select-Object -First 1
-    if (-not $sdk) { throw "The $SdkTag archive has no ffx-api folder; it is not the FidelityFX SDK this bridge expects." }
+    $sdk = Get-ChildItem $scratch -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'Kits') } | Select-Object -First 1
+    if (-not $sdk) { throw "The $SdkTag archive has no Kits folder; it is not the FidelityFX SDK this bridge expects." }
     $sdk = $sdk.FullName
 }
-if (-not (Test-Path (Join-Path $sdk 'ffx-api\include\ffx_api\ffx_api.h'))) {
-    throw "No ffx-api\include\ffx_api\ffx_api.h in $sdk; that is not a FidelityFX SDK 1.1.4 checkout."
+if (-not (Test-Path (Join-Path $sdk 'Kits\FidelityFX\api\include\ffx_api.h'))) {
+    throw "No Kits\FidelityFX\api\include\ffx_api.h in $sdk; that is not a FidelityFX SDK 2.3.0 checkout."
 }
-$amdDll = Get-ChildItem $sdk -Recurse -Filter 'amd_fidelityfx_dx12.dll' | Select-Object -First 1
-if (-not $amdDll) {
-    throw "No amd_fidelityfx_dx12.dll in $sdk (looked under PrebuiltSignedDLL). A later SDK splits the API into several DLLs; use SDK 1.1.4 (-SdkTag v1.1.4)."
+$signedbin = Join-Path $sdk 'Kits\FidelityFX\signedbin'
+$loaderDll = Get-ChildItem $signedbin -Filter 'amd_fidelityfx_loader_dx12.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+$fgDll = Get-ChildItem $signedbin -Filter 'amd_fidelityfx_framegeneration_dx12.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $loaderDll -or -not $fgDll) {
+    throw "No loader + framegeneration DLLs in $signedbin. That is not a FidelityFX SDK 2.3.0 checkout (looked for amd_fidelityfx_loader_dx12.dll and amd_fidelityfx_framegeneration_dx12.dll under Kits\FidelityFX\signedbin)."
 }
 Write-Host "  SDK: $sdk"
-Write-Host "  AMD's DLL: $($amdDll.FullName)"
+Write-Host "  AMD's loader DLL: $($loaderDll.FullName)"
+Write-Host "  AMD's framegeneration DLL: $($fgDll.FullName)"
 
 # Build the bridge. CMake and a C++ compiler (Visual Studio with the
 # Desktop development with C++ workload) must be installed; the build
@@ -137,15 +145,16 @@ if ($LASTEXITCODE -ne 0) { throw 'cmake build failed (see above): the bridge did
 $bridge = Get-ChildItem $build -Recurse -Filter 'fsr3_bridge.dll' | Select-Object -First 1
 if (-not $bridge) { throw 'The build produced no fsr3_bridge.dll.' }
 Copy-Item $bridge.FullName (Join-Path $install 'fsr3_bridge.dll') -Force
-Copy-Item $amdDll.FullName (Join-Path $install 'amd_fidelityfx_dx12.dll') -Force
+Copy-Item $loaderDll.FullName (Join-Path $install 'amd_fidelityfx_loader_dx12.dll') -Force
+Copy-Item $fgDll.FullName (Join-Path $install 'amd_fidelityfx_framegeneration_dx12.dll') -Force
 $license = Get-ChildItem $sdk -Filter 'LICENSE*' | Select-Object -First 1
 if ($license) { Copy-Item $license.FullName (Join-Path $install $license.Name) -Force }
 Remove-Item $build -Recurse -Force -ErrorAction SilentlyContinue
 if ($scratch) { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
 
-$missing = @('fsr3_bridge.dll', 'amd_fidelityfx_dx12.dll') | Where-Object { -not (Test-Path (Join-Path $install $_)) }
+$missing = @('fsr3_bridge.dll', 'amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_framegeneration_dx12.dll') | Where-Object { -not (Test-Path (Join-Path $install $_)) }
 if ($missing) { throw "Not there after all: $($missing -join ', ')" }
 Write-Host ''
-Write-Host "Done. In $install : fsr3_bridge.dll, amd_fidelityfx_dx12.dll."
+Write-Host "Done. In $install : fsr3_bridge.dll, amd_fidelityfx_loader_dx12.dll, amd_fidelityfx_framegeneration_dx12.dll."
 Write-Host 'Next: .\scripts\play-foxhound.ps1 -Exe <path of your own copy''s executable> -Fsr3FrameGen'
 Write-Host '  (or: victory play --fsr3-framegen). FSR 3 frame generation, 2x, with the title''s own upscaling.'

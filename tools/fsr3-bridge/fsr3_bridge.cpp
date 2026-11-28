@@ -1,21 +1,29 @@
 // fsr3_bridge.cpp - FSR 3 frame generation for VIctory, via the
-// FidelityFX API (FSR 3.1, FidelityFX SDK 1.1.4).
+// FidelityFX API (FSR 3.1.6 / 3.1.7, FidelityFX SDK 2.3.0).
 //
 // This is the ONLY file in the repository that knows AMD's FidelityFX
 // structs. It is compiled on Windows against the real SDK headers
-// (`ffx-api/include`), so a struct that changed in a newer SDK fails
-// the build here, loudly, instead of corrupting memory at run time
-// from a hand-mirrored layout in Rust.
+// (Kits/FidelityFX/api/include + framegeneration/include), so a
+// struct that changed in a newer SDK fails the build here, loudly,
+// instead of corrupting memory at run time from a hand-mirrored
+// layout in Rust.
 //
 // What it does, per GPUOpen ("AMD FSR Frame Generation API",
-// "FSR 3.1 Integration Overview", FSR 3.1.4):
-//   1. Loads AMD's signed DLL at run time (amd_fidelityfx_dx12.dll,
-//      SDK 2.0 fallback amd_fidelityfx_loader_dx12.dll) and resolves
-//      the five ffx* functions with GetProcAddress.
+// "FSR 3.1 Integration Overview", FSR 3.1.7):
+//   1. Loads AMD's signed DLLs at run time: the loader
+//      (amd_fidelityfx_loader_dx12.dll) exposes the five ffx*
+//      functions, and the framegeneration DLL
+//      (amd_fidelityfx_framegeneration_dx12.dll) beside it holds
+//      the providers. The loader's folder is AddDllDirectory'd
+//      first, or provider discovery reports NO_PROVIDER.
 //   2. fsr3_fg_create: creates a frame-generation context
-//      (ffxCreateContextDescFrameGeneration + backend desc). SDK 1.1.4
-//      has no version struct to chain (that arrived in SDK 2.1), so
-//      the backend desc is chained directly.
+//      (ffxCreateContextDescFrameGeneration + backend desc). No
+//      version override and no FG Version struct are chained:
+//      the override makes ffxCreateContext return
+//      INVALID_ARGUMENT in SDK 2.3.0, and the FG Version struct
+//      would request FFX_FRAMEGENERATION_VERSION 4.0.1 (FSR 4, ML
+//      hardware), which is wrong for this GPU. The DLL's default
+//      selection picks the only FG provider it exposes (3.1.6).
 //   3. fsr3_fg_wrap_swapchain: wraps the game's swap chain in FSR 3's
 //      frame-interpolation swap chain
 //      (ffxCreateContextDescFrameGenerationSwapChainWrapDX12, type
@@ -36,12 +44,12 @@
 //      failed wrap can be traced to the call that actually fails,
 //      without another build.
 //   4. fsr3_fg_prepare: dispatches the frame-generation prepare pass
-//      (ffxDispatchDescFrameGenerationPrepare) into the caller's
-//      command list, from depth + motion vectors, with the camera
-//      info linked after it
-//      (ffxDispatchDescFrameGenerationPrepareCameraInfo - a required
-//      input in FSR 3.1.4). There is no PrepareV2 in SDK 1.1.4 (it
-//      replaced these two structs in SDK 2.1 / FSR 3.1.6).
+//      (ffxDispatchDescFrameGenerationPrepareV2) into the caller's
+//      command list, from depth + motion vectors. PrepareV2 embeds
+//      the camera vectors and has a REAL `reset` bool, so a scene
+//      cut resets through the flag the Rust side already passes
+//      (the old Prepare's `unused_reset` was ignored, and the old
+//      Prepare + CameraInfo pair is deprecated in SDK 2.1+).
 //   5. fsr3_fg_configure: configures frame generation once per frame
 //      (ffxConfigureDescFrameGeneration), registering the frame-
 //      generation callback (which dispatches the interpolation) and
@@ -69,34 +77,33 @@
 //   - Async workloads are off (flag bit 4 must be 0): the optical-
 //     flow and interpolation work runs on the graphics queue, in
 //     the order the layer submits it.
-//   - Reset: FSR 3.1.4's prepare has only `unused_reset`, which the
-//     implementation ignores - there is no working reset flag in
-//     this SDK. A scene cut resets FSR 3 only through a disjoint
-//     frameID (a step other than +1), which the Rust side owns:
-//     it must skip an id when the title cuts. Until then, a hard
-//     cut may ghost for a frame or two, as in every 3.1.4
-//     integration.
+//   - Reset: PrepareV2 (SDK 2.1+) has a real `reset` bool, and
+//     this bridge passes the Rust side's reset flag straight
+//     through it — so a scene cut resets FSR 3 properly. (The
+//     old Prepare's `unused_reset` was ignored by the
+//     implementation, which is why a cut could only reset via a
+//     disjoint frameID in SDK 1.1.4.) The Rust side still owns
+//     detecting the cut and passing reset=1; until it does, a
+//     hard cut may ghost for a frame or two.
 
 #include "fsr3_bridge.h"
 
 #include <windows.h>
 #include <d3d12.h>
+#include <d3d12sdklayers.h>
 #include <dxgi1_4.h>
 
-#include <ffx_api/ffx_api.h>
-#include <ffx_api/dx12/ffx_api_dx12.h>
-
-// The frame-generation structs live in their own header, which
-// ffx_api.h does not include. Its name differs between SDK
-// generations (ffx_framegeneration.h in 1.1.x, ffx_fg.h in the
-// migration guide's naming); take whichever this SDK has.
-#if __has_include(<ffx_api/ffx_framegeneration.h>)
-#  include <ffx_api/ffx_framegeneration.h>
-#elif __has_include(<ffx_api/ffx_fg.h>)
-#  include <ffx_api/ffx_fg.h>
-#else
-#  error "no frame-generation header in this SDK (looked for ffx_api/ffx_framegeneration.h and ffx_api/ffx_fg.h)"
-#endif
+// SDK 2.3.0 headers. The CMakeLists adds
+// Kits/FidelityFX/api/include and
+// Kits/FidelityFX/framegeneration/include to the include path, so
+// these resolve without a prefix. (SDK 1.1.4 kept everything under
+// ffx-api/include; 2.x splits the API core from each effect's
+// headers, and the swap-chain structs moved from ffx_api_dx12.h
+// into ffx_api_framegeneration_dx12.h.)
+#include <ffx_api.h>
+#include <dx12/ffx_api_dx12.h>
+#include <ffx_framegeneration.h>
+#include <dx12/ffx_api_framegeneration_dx12.h>
 
 #include <cstdio>
 #include <cstring>
@@ -150,6 +157,18 @@ struct Fsr3FgState {
 };
 
 // Load AMD's DLL from the same folder as this bridge DLL.
+// SDK 2.x splits the API: the LOADER DLL
+// (amd_fidelityfx_loader_dx12.dll) exposes the five ffx*
+// functions and finds the effect DLL
+// (amd_fidelityfx_framegeneration_dx12.dll) beside it. The loader
+// resolves the effect DLL from its own folder, but a public probe
+// found provider discovery also needs that folder on the DLL
+// search path, so AddDllDirectory it first (and load with
+// LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR) — otherwise the loader
+// reports NO_PROVIDER. The old single DLL
+// (amd_fidelityfx_dx12.dll, SDK 1.1.4) is tried as a fallback,
+// but its 1.1.3 swap-chain provider cannot create a context on
+// this machine, so the loader is tried first.
 bool loadAmd(FfxApi &api) {
     wchar_t path[MAX_PATH];
     if (GetModuleFileNameW(reinterpret_cast<HMODULE>(&__ImageBase), path, MAX_PATH) == 0) {
@@ -158,11 +177,23 @@ bool loadAmd(FfxApi &api) {
     // __ImageBase is the bridge DLL's own base; its folder is AMD's.
     wchar_t *slash = wcsrchr(path, L'\\');
     if (slash) *slash = L'\0';
-    const wchar_t *names[] = {L"amd_fidelityfx_dx12.dll", L"amd_fidelityfx_loader_dx12.dll"};
+    // Put the folder on the process DLL search path so the loader
+    // can find the framegeneration DLL when it looks for it.
+    // AddDllDirectory alone is NOT enough: the loader resolves the
+    // effect DLL with a plain LoadLibrary, which does not search
+    // AddDllDirectory dirs — it needs SetDllDirectoryW too.
+    // (Proven by the standalone tests: test_fsr3_wrap_v2, which
+    // calls both, enumerates the providers and wraps fine; the
+    // FG-creation probe, which called only AddDllDirectory,
+    // returned 0 FG providers and every FG creation failed code 2.)
+    AddDllDirectory(path);
+    SetDllDirectoryW(path);
+    const wchar_t *names[] = {L"amd_fidelityfx_loader_dx12.dll", L"amd_fidelityfx_dx12.dll"};
     for (const wchar_t *name : names) {
         wchar_t full[MAX_PATH];
         _snwprintf_s(full, MAX_PATH, _TRUNCATE, L"%s\\%s", path, name);
-        HMODULE module = LoadLibraryW(full);
+        HMODULE module = LoadLibraryExW(full, nullptr,
+                                        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
         if (!module) continue;
         auto get = [&](const char *n) {
             return reinterpret_cast<void *>(GetProcAddress(module, n));
@@ -223,26 +254,6 @@ FfxApiResource apiResource(ID3D12Resource *resource, uint32_t d3d12State) {
     return ffxApiGetResourceDX12(resource, apiState(d3d12State));
 }
 
-// Whether a linked struct carries a header. SDK 1.1.4's
-// ffxDispatchDescFrameGenerationPrepareCameraInfo does (its type id
-// goes in that header); later SDKs stripped it when the struct was
-// deprecated in favour of PrepareV2.
-template <typename T, typename = void>
-struct HasHeader : std::false_type {};
-template <typename T>
-struct HasHeader<T, std::void_t<decltype(std::declval<T>().header)>> : std::true_type {};
-
-// Chain `linked` after a dispatch desc, setting its header type when
-// it has one. The header is the struct's first member, so the
-// struct's address is the header's address either way.
-template <typename T, typename U>
-ffxDispatchDescHeader *linkHeader(T &linked, U type) {
-    if constexpr (HasHeader<T>::value) {
-        linked.header.type = static_cast<decltype(linked.header.type)>(type);
-    }
-    return reinterpret_cast<ffxDispatchDescHeader*>(&linked);
-}
-
 // Called by the FSR swap chain during Present, to generate a frame.
 // Dispatches the interpolation with the parameters FSR 3 supplies.
 ffxReturnCode_t frameGenerationCallback(ffxDispatchDescFrameGeneration *params, void *userCtx) {
@@ -265,32 +276,27 @@ ffxReturnCode_t presentCallback(ffxCallbackDescFrameGenerationPresent *params, v
 }
 
 // Make the frame-generation context from fg's current fields.
-// AMD's debug checker (SDK 1.1.4): FFX_FRAMEGENERATION_ENABLE_DEBUG_CHECKING
+// AMD's debug checker: FFX_FRAMEGENERATION_ENABLE_DEBUG_CHECKING
 // in the frame-generation create flags makes the runtime check its inputs
 // and report issues; ffxConfigureDescGlobalDebug1 routes those messages to
 // fpMessage (if fpMessage is null they go to the debugger TTY instead).
 // Values verified against GPUOpen's ffx-api headers; the fallbacks only
 // apply if this SDK's headers predate them.
-#ifndef FFX_FRAMEGENERATION_ENABLE_DEBUG_CHECKING
-#define FFX_FRAMEGENERATION_ENABLE_DEBUG_CHECKING (1u << 6)
-#endif
-#ifndef FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG1
-#define FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG1 0x0000001u
-#define FFX_API_CONFIGURE_GLOBALDEBUG_LEVEL_VERBOSE 0xfffffffu
-typedef void (*ffxApiMessage)(uint32_t type, const wchar_t *message);
-struct ffxConfigureDescGlobalDebug1 {
-    ffxConfigureDescHeader header;
-    ffxApiMessage fpMessage;
-    uint32_t debugLevel;
-};
-#endif
-
+//
 // Forward: registers the debug-message callback (defined after
 // bridgeFolder, which it needs to find fsr3_debug.txt).
 void registerDebug(Fsr3FgState *fg);
 
-// The swapchain context is untouched: it keeps pointing at this
-// same Fsr3FgState for its callbacks.
+// SDK 2.3.0: the framegeneration DLL holds BOTH FSR 4 (4.0.1) and
+// the legacy FSR 3.1.6 provider. FFX_FRAMEGENERATION_VERSION is
+// 4.0.1, which needs ML hardware and is wrong for this GPU, so the
+// FG Version struct is NOT chained here. No version override is
+// chained either: ffxOverrideVersion in the FG desc's pNext makes
+// ffxCreateContext return INVALID_ARGUMENT (code 2, seen in the
+// 2026-11-27 23:29 run). The override is unnecessary —
+// GetVersions for the FG type returns exactly ONE provider
+// (3.1.6), so the DLL's default selection picks it. The backend
+// desc is chained directly, as the 1.1.4 bridge did.
 int createFgContext(Fsr3FgState *fg) {
     ffxCreateBackendDX12Desc backendDesc{};
     backendDesc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
@@ -300,16 +306,28 @@ int createFgContext(Fsr3FgState *fg) {
     createFg.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
     createFg.displaySize = {fg->displayWidth, fg->displayHeight};
     createFg.maxRenderSize = {fg->renderWidth, fg->renderHeight};
-    // Debug checking on while the wrap is being diagnosed: the DLL
-    // then reports bad inputs instead of failing silently.
-    createFg.flags = fgFlags(fg->flags) | FFX_FRAMEGENERATION_ENABLE_DEBUG_CHECKING;
+    // No DEBUG_CHECKING flag: the 3.1.6 provider in SDK 2.3.0
+    // rejects it (INVALID_ARGUMENT, code 2 — the FG context failed
+    // in both v5.0 and v5.1 with this flag set, and the override
+    // was not the cause). The debug-message callback
+    // (registerDebug) is separate and stays, so the DLL can still
+    // report messages to fsr3_debug.txt.
+    createFg.flags = fgFlags(fg->flags);
     createFg.backBufferFormat = surfaceFormat(fg->backBufferFormat);
     if (createFg.backBufferFormat == FFX_API_SURFACE_FORMAT_UNKNOWN) {
         return -1;
     }
 
-    // SDK 1.1.4 has no version struct to chain (that arrived in
-    // SDK 2.1); the backend desc is chained directly.
+    // No version override here. The FG context creation in SDK
+    // 2.3.0 rejects ffxOverrideVersion in the FG desc's pNext
+    // (INVALID_ARGUMENT, code 2 — seen in the 2026-11-27 23:29 run),
+    // and the override is unnecessary anyway: GetVersions for the
+    // FG type returns exactly ONE provider (3.1.6), so the DLL's
+    // default selection picks it. The FG Version struct is also
+    // NOT chained — FFX_FRAMEGENERATION_VERSION is 4.0.1 (FSR 4,
+    // ML hardware), which is wrong for this GPU. Chain the backend
+    // desc directly, as the 1.1.4 bridge did (and as the FG context
+    // creation there succeeded).
     createFg.header.pNext = &backendDesc.header;
 
     ffxReturnCode_t code = fg->api.createContext(&fg->fgContext, &createFg.header, nullptr);
@@ -468,6 +486,18 @@ struct WrapProbes {
     BOOL waveOps = FALSE;
     UINT resourceBindingTier = 0xFFFFFFFF;
     HRESULT backSrvHr = E_FAIL;
+    // Round 7: every probe passes and the wrap still fails code 3,
+    // so the failure is in a D3D12 call none of them replicated.
+    // The DLL reads ALL back buffers (not just 0) and may share a
+    // resource between its present queue and the game queue.
+    HRESULT getBuffer1Hr = E_FAIL;
+    HRESULT sharedTexHr = E_FAIL;
+    // Round 7 (info queue): the D3D12 debug layer's message queue,
+    // captured around the wrap call, names the failing D3D12 call
+    // directly - if the debug layer is on. -1 means the queue was
+    // not available (debug layer off); >= 0 is how many messages
+    // were captured into fsr3_d3d12_messages.txt.
+    INT infoQueueMessages = -1;
 };
 
 // Minimal DXC (DirectX Shader Compiler) interfaces for compiling a CS 6.2
@@ -613,6 +643,17 @@ WrapProbes probeWrap(ID3D12Device *device, ID3D12CommandQueue *gameQueue, IDXGIS
         p.rtvUavTexHr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &rtTex,
                                                         D3D12_RESOURCE_STATE_COMMON, &clear, IID_PPV_ARGS(&rtRes));
         if (rtRes) rtRes->Release();
+        // Round 7: the DLL's present queue and the game queue share
+        // resources, so a shared texture (HEAP_FLAG_SHARED) must be
+        // creatable. A shared fence already works; a shared resource
+        // is the untested half.
+        D3D12_RESOURCE_DESC sharedTex = tex;
+        sharedTex.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sharedTex.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        ID3D12Resource *sharedRes = nullptr;
+        p.sharedTexHr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &sharedTex,
+                                                        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&sharedRes));
+        if (sharedRes) sharedRes->Release();
         // The DLL creates compute pipelines from CS 6.2 shaders during
         // the wrap. Test pipeline creation on this device twice: once
         // with a CS 5.1 shader (the legacy D3DCompiler can do that)
@@ -812,6 +853,12 @@ WrapProbes probeWrap(ID3D12Device *device, ID3D12CommandQueue *gameQueue, IDXGIS
     if (swapchain) {
         ID3D12Resource *back = nullptr;
         p.getBufferHr = swapchain->GetBuffer(0, IID_PPV_ARGS(&back));
+        // Round 7: the DLL reads ALL back buffers, not just 0. The
+        // chain has 2 buffers; if buffer 1 cannot be read, the wrap
+        // cannot track it.
+        ID3D12Resource *back1 = nullptr;
+        p.getBuffer1Hr = swapchain->GetBuffer(1, IID_PPV_ARGS(&back1));
+        if (back1) back1->Release();
         // Round 6: the DLL reads the back buffer as the interpolation
         // input, so a shader-resource view for it must be creatable.
         // (A UAV is not tested: swap-chain buffers do not carry
@@ -923,13 +970,20 @@ void writeWrapDiag(const wchar_t *folder, const DXGI_SWAP_CHAIN_DESC1 *desc1, HR
     FILE *f = nullptr;
     if (_wfopen_s(&f, path, L"w") != 0 || !f) return;
     fwprintf(f, L"FSR 3 swap-chain wrap diagnostics\n");
-    // Version marker: proves which bridge wrote this file. v3.8's probe
-    // asks for shader model 6.6 and root signature 1.1, records each
-    // DXC step separately, falls back to loading dxcompiler.dll from
-    // this bridge DLL's own folder, and adds round 6: execute a
-    // command list on the game queue + fence wait, WaveOps / resource
-    // binding tier, and a back-buffer SRV.
-    fwprintf(f, L"bridge v3.8: probe asks shader model 6.6, root signature 1.1; DXC steps recorded separately + DXC error text; DXC falls back to the bridge folder; round 6 adds queue execution, WaveOps, back-buffer SRV\n");
+    // Version marker: proves which bridge wrote this file. v5.3
+    // adds SetDllDirectoryW beside AddDllDirectory: the loader
+    // resolves the framegeneration DLL with a plain LoadLibrary,
+    // which does not search AddDllDirectory dirs, so without it
+    // the loader finds 0 FG providers and every FG creation fails
+    // INVALID_ARGUMENT (code 2). The FG context is backend-only
+    // with no DEBUG_CHECKING flag; the wrap chains the swap-chain
+    // version struct (3.1.7) + backend desc, and prepare uses
+    // PrepareV2 (real reset flag). Probes as before:
+    // shader model 6.6, root signature 1.1, DXC steps, round 6
+    // (queue execution, WaveOps, back-buffer SRV), round 7
+    // (GetBuffer(1), shared texture, D3D12 info queue), round 11
+    // (provider-version enumeration, fsr3_versions.txt).
+    fwprintf(f, L"bridge v5.3 (SDK 2.3.0): loader + framegeneration DLL, AddDllDirectory AND SetDllDirectoryW; FG context is backend-only, no DEBUG_CHECKING flag; wrap chains swap-chain version 3.1.7 + backend; prepare is PrepareV2; probes: SM 6.6, RS 1.1, DXC, queue exec, WaveOps, SRV, GetBuffer(1), shared texture, D3D12 info queue\n");
     if (desc1 && hrDesc == S_OK) {
         fwprintf(f, L"chain desc: %ux%u format=%u buffers=%u usage=0x%x swapEffect=%d sample=%u/%u flags=0x%x stereo=%d scaling=%d alpha=%d\n",
                  (unsigned)desc1->Width, (unsigned)desc1->Height, (unsigned)desc1->Format,
@@ -984,6 +1038,9 @@ void writeWrapDiag(const wchar_t *folder, const DXGI_SWAP_CHAIN_DESC1 *desc1, HR
                  (unsigned)probes->waveOpsHr, (int)probes->waveOps,
                  (unsigned)probes->resourceBindingTier,
                  (unsigned)probes->backSrvHr);
+        fwprintf(f, L"probes: GetBuffer(1) hr=0x%08x; shared texture hr=0x%08x; D3D12 info-queue messages=%d (see fsr3_d3d12_messages.txt; -1 means the debug layer is off)\n",
+                 (unsigned)probes->getBuffer1Hr, (unsigned)probes->sharedTexHr,
+                 (int)probes->infoQueueMessages);
         if (probes->dxcError[0] != '\0') {
             // DXC's error text is ASCII; print it as-is (truncated to
             // the 511 bytes the probe kept).
@@ -1091,8 +1148,67 @@ int fsr3_fg_wrap_swapchain(void *fgIn, void **swapchainInOut, void **outWrapped)
     wrapDesc.swapchain = &swapchain;
     wrapDesc.gameQueue = fg->gameQueue;
 
+    // SDK 2.3.0: chain the swap-chain version struct (required
+    // since SDK 2.1) and the backend desc. The version struct
+    // declares the API version this was built against (3.1.7);
+    // the standalone test proved this exact chain (version +
+    // backend, no override) makes the wrap succeed where the
+    // 1.1.3 provider failed with every desc variant. Chain:
+    // wrapDesc -> version -> backend.
+    ffxCreateBackendDX12Desc wrapBackend{};
+    wrapBackend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
+    wrapBackend.device = fg->device;
+    ffxCreateContextDescFrameGenerationSwapChainVersionDX12 wrapVersion{};
+    wrapVersion.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_VERSION_DX12;
+    wrapVersion.version = FFX_FRAMEGENERATION_SWAPCHAIN_DX12_VERSION;
+    wrapVersion.header.pNext = &wrapBackend.header;
+    wrapDesc.header.pNext = &wrapVersion.header;
+
+    // Round 7: capture the D3D12 debug layer's messages around the
+    // wrap call. If the debug layer is on, the queue names the exact
+    // D3D12 call that fails inside the DLL. Clear it first so only
+    // the wrap's messages are captured.
+    ID3D12InfoQueue *infoQueue = nullptr;
+    if (fg->device) {
+        if (SUCCEEDED(fg->device->QueryInterface(IID_PPV_ARGS(&infoQueue))) && infoQueue) {
+            infoQueue->ClearStoredMessages();
+        }
+    }
+
     ffxReturnCode_t code = fg->api.createContext(&fg->swapContext, &wrapDesc.header, nullptr);
     bool ok = (code == FFX_API_RETURN_OK && fg->swapContext && swapchain);
+    // Dump the captured D3D12 messages (if any) to their own file,
+    // and record how many there were in the diag.
+    if (infoQueue) {
+        UINT64 count = infoQueue->GetNumStoredMessages();
+        probes.infoQueueMessages = static_cast<INT>(count > 0x7FFFFFFFULL ? 0x7FFFFFFF : count);
+        wchar_t folder2[MAX_PATH];
+        if (bridgeFolder(folder2, MAX_PATH)) {
+            wchar_t mpath[MAX_PATH];
+            _snwprintf_s(mpath, MAX_PATH, _TRUNCATE, L"%s\\fsr3_d3d12_messages.txt", folder2);
+            FILE *mf = nullptr;
+            if (_wfopen_s(&mf, mpath, L"w") == 0 && mf) {
+                fwprintf(mf, L"D3D12 debug-layer messages around the swap-chain wrap (code=%d)\n", (int)code);
+                SIZE_T cap = 64;
+                for (UINT64 i = 0; i < count && i < cap; ++i) {
+                    SIZE_T len = 0;
+                    if (FAILED(infoQueue->GetMessage(i, nullptr, &len)) || len == 0) continue;
+                    // The message buffer is a D3D12_MESSAGE followed
+                    // by its description string.
+                    char *buf = new (std::nothrow) char[len];
+                    if (!buf) break;
+                    D3D12_MESSAGE *msg = reinterpret_cast<D3D12_MESSAGE *>(buf);
+                    if (SUCCEEDED(infoQueue->GetMessage(i, msg, &len)) && msg->pDescription) {
+                        fwprintf(mf, L"[%u] severity=%d id=%d: %S\n",
+                                 (unsigned)i, (int)msg->Severity, (int)msg->ID, msg->pDescription);
+                    }
+                    delete[] buf;
+                }
+                fclose(mf);
+            }
+        }
+        infoQueue->Release();
+    }
     wchar_t folder[MAX_PATH];
     if (bridgeFolder(folder, MAX_PATH)) {
         writeWrapDiag(folder, &desc1, hrDesc, deviceMatches, hrDev, fg->gameQueue,
@@ -1114,6 +1230,176 @@ int fsr3_fg_wrap_swapchain(void *fgIn, void **swapchainInOut, void **outWrapped)
     return 0;
 }
 
+// Round 10: create the frame-generation swap chain via ForHwnd
+// instead of Wrap. The official FSR 3 sample uses ForHwnd, not
+// Wrap, and Wrap has now failed in every configuration tried
+// (2 and 3 back buffers, with and without a backend desc chained,
+// on victory's chain and on a plain standalone chain) with the
+// same silent code 3 and zero D3D12 messages. ForHwnd is a
+// completely different DLL code path: it CREATES a new proxy chain
+// from the window + desc + factory instead of wrapping the
+// existing one, so if Wrap is broken in this DLL build, ForHwnd
+// may still work. The existing chain is only used to read the
+// hwnd, desc, fullscreen desc, and factory; the DLL creates the
+// new proxy chain and hands it back via *outWrapped. The caller
+// must use the returned chain instead of the original.
+//
+// NOTE: __declspec(dllexport) is on this definition (not just the
+// header) because the bridge's other functions are exported via
+// the header's declarations and this new function is not declared
+// there yet — without dllexport here, GetProcAddress cannot find
+// it even though the DLL contains it (v4.1 proved this: the diag
+// said v4.1 ran, but the test could not resolve the function).
+__declspec(dllexport) int fsr3_fg_create_swapchain_for_hwnd(void *fgIn, void **swapchainInOut, void **outWrapped) {
+    auto *fg = static_cast<Fsr3FgState *>(fgIn);
+    if (!fg || !swapchainInOut || !*swapchainInOut || !outWrapped) return -1;
+    auto *oldChain = static_cast<IDXGISwapChain4 *>(*swapchainInOut);
+
+    // Read everything the ForHwnd desc needs from the old chain.
+    HWND hwnd = nullptr;
+    HRESULT hrHwnd = oldChain->GetHwnd(&hwnd);
+    DXGI_SWAP_CHAIN_DESC1 desc1{};
+    HRESULT hrDesc = oldChain->GetDesc1(&desc1);
+    DXGI_SWAP_CHAIN_FULLSCREEN_DESC fsDesc{};
+    HRESULT hrFs = oldChain->GetFullscreenDesc(&fsDesc);
+    IDXGIFactory *factory = nullptr;
+    HRESULT hrFactory = oldChain->GetParent(IID_PPV_ARGS(&factory));
+    if (FAILED(hrHwnd) || !hwnd || FAILED(hrDesc) || FAILED(hrFs) || FAILED(hrFactory) || !factory) {
+        if (factory) factory->Release();
+        return -2;
+    }
+
+    // The DLL creates the new proxy chain and writes it here.
+    IDXGISwapChain4 *newChain = nullptr;
+    ffxCreateContextDescFrameGenerationSwapChainForHwndDX12 forHwnd{};
+    forHwnd.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_FOR_HWND_DX12;
+    forHwnd.hwnd = hwnd;
+    forHwnd.desc = &desc1;
+    forHwnd.fullscreenDesc = &fsDesc;
+    forHwnd.dxgiFactory = factory;
+    forHwnd.gameQueue = fg->gameQueue;
+    forHwnd.swapchain = &newChain;
+    // Chain a backend desc, as v4.0 did for the wrap: if the DLL
+    // reads the backend from pNext to identify DX12, ForHwnd
+    // needs it just as much.
+    // SDK 2.3.0: same version struct + backend as the Wrap path
+    // (see there). The standalone test's ForHwnd still failed
+    // code 3 even with the version struct, so this path is kept
+    // for completeness only — victory uses Wrap.
+    ffxCreateBackendDX12Desc forHwndBackend{};
+    forHwndBackend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
+    forHwndBackend.device = fg->device;
+    ffxCreateContextDescFrameGenerationSwapChainVersionDX12 forHwndVersion{};
+    forHwndVersion.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_VERSION_DX12;
+    forHwndVersion.version = FFX_FRAMEGENERATION_SWAPCHAIN_DX12_VERSION;
+    forHwndVersion.header.pNext = &forHwndBackend.header;
+    forHwnd.header.pNext = &forHwndVersion.header;
+
+    // A fresh swapchain context (the wrap's failed context, if any,
+    // was already destroyed by the wrap call).
+    if (fg->swapContext) {
+        fg->api.destroyContext(&fg->swapContext, nullptr);
+        fg->swapContext = nullptr;
+    }
+    ffxReturnCode_t code = fg->api.createContext(&fg->swapContext, &forHwnd.header, nullptr);
+    factory->Release();
+    if (code != FFX_API_RETURN_OK || !fg->swapContext || !newChain) {
+        if (fg->swapContext) {
+            fg->api.destroyContext(&fg->swapContext, nullptr);
+            fg->swapContext = nullptr;
+        }
+        if (newChain) newChain->Release();
+        return static_cast<int>(code);
+    }
+    newChain->AddRef();
+    *outWrapped = newChain;
+    return 0;
+}
+
+// Round 11: enumerate which FSR providers this DLL actually has.
+// Both Wrap and ForHwnd fail with code 3 (RUNTIME_ERROR), not
+// code 4 (NO_PROVIDER), so a provider IS found — but the
+// creation still fails silently. The decisive question is
+// whether the DLL even HAS a swap-chain provider, and which
+// version it is. ffxQueryDescGetVersions (type 4, a null-context
+// query in SDK 1.1.4's ffx_api.h) enumerates the provider
+// versions available for a given create-desc type, given a
+// device. Query it for the FG type (0x20001, known to work),
+// Wrap (0x30001), New (0x30005) and ForHwnd (0x30006), and
+// write the counts + version names to fsr3_versions.txt beside
+// this DLL. If the swap-chain types report count 0, the DLL has
+// no swap-chain provider at all (the DLL build is missing the
+// effect) — and no desc tweak will ever make the wrap work.
+// If they report versions, the provider exists and the failure
+// is in how it is being invoked.
+__declspec(dllexport) int fsr3_query_versions(void *fgIn) {
+    auto *fg = static_cast<Fsr3FgState *>(fgIn);
+    if (!fg || !fg->api.query || !fg->device) return -1;
+    wchar_t folder[MAX_PATH];
+    if (!bridgeFolder(folder, MAX_PATH)) return -1;
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\fsr3_versions.txt", folder);
+    FILE *f = nullptr;
+    if (_wfopen_s(&f, path, L"w") != 0 || !f) return -1;
+    struct TypeEntry { uint64_t type; const char *name; };
+    const TypeEntry types[] = {
+        {0x20001u, "framegeneration"},
+        {0x30001u, "swapchain-wrap"},
+        {0x30005u, "swapchain-new"},
+        {0x30006u, "swapchain-for-hwnd"},
+    };
+    for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); ++i) {
+        ffxQueryDescGetVersions qv{};
+        qv.header.type = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
+        qv.createDescType = types[i].type;
+        qv.device = fg->device;
+        uint64_t count = 0;
+        qv.outputCount = &count;
+        qv.versionIds = nullptr;
+        qv.versionNames = nullptr;
+        ffxReturnCode_t rc = fg->api.query(nullptr, &qv.header);
+        fwprintf(f, L"%S (type 0x%llx): query rc=%d count=%llu\n",
+                 types[i].name, (unsigned long long)types[i].type, (int)rc, (unsigned long long)count);
+        if (rc == FFX_API_RETURN_OK && count > 0) {
+            // Fetch the version names (and ids) for display.
+            uint64_t cap = count > 8 ? 8 : count;
+            uint64_t ids[8] = {};
+            const char *names[8] = {};
+            uint64_t outCount = cap;
+            ffxQueryDescGetVersions qv2{};
+            qv2.header.type = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
+            qv2.createDescType = types[i].type;
+            qv2.device = fg->device;
+            qv2.outputCount = &outCount;
+            qv2.versionIds = ids;
+            qv2.versionNames = names;
+            ffxReturnCode_t rc2 = fg->api.query(nullptr, &qv2.header);
+            if (rc2 == FFX_API_RETURN_OK) {
+                for (uint64_t j = 0; j < outCount && j < 8; ++j) {
+                    fwprintf(f, L"  [%llu] id=%llu name=%S\n",
+                             (unsigned long long)j, (unsigned long long)ids[j],
+                             names[j] ? names[j] : "(null)");
+                }
+            } else {
+                fwprintf(f, L"  (name fetch rc=%d)\n", (int)rc2);
+            }
+        }
+    }
+    // Also report the FG context's own provider version (type 6).
+    if (fg->fgContext) {
+        ffxQueryGetProviderVersion pv{};
+        pv.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
+        pv.versionId = 0;
+        pv.versionName = nullptr;
+        ffxReturnCode_t rc = fg->api.query(&fg->fgContext, &pv.header);
+        fwprintf(f, L"fg-context provider: query rc=%d id=%llu name=%S\n",
+                 (int)rc, (unsigned long long)pv.versionId,
+                 pv.versionName ? pv.versionName : "(null)");
+    }
+    fclose(f);
+    return 0;
+}
+
 int fsr3_fg_prepare(
     void *fgIn, void *commandList,
     void *depth, uint32_t depthState,
@@ -1130,45 +1416,46 @@ int fsr3_fg_prepare(
         // after a scene cut, so it is not an error here - the reset
         // flag carries it.
     }
-    (void)reset; // FSR 3.1.4's prepare has only `unused_reset`, which
-                 // the implementation ignores (see the file header):
-                 // there is no working reset flag in this SDK.
 
-    ffxDispatchDescFrameGenerationPrepare prepare{};
-    prepare.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE;
-    prepare.frameID = static_cast<uint32_t>(frameID);
+    // SDK 2.3.0: PrepareV2 replaces the old Prepare + CameraInfo
+    // pair (both deprecated in 2.1). PrepareV2 embeds the camera
+    // vectors directly and, critically, has a REAL `reset` bool
+    // instead of the old `unused_reset` the implementation
+    // ignored — so a scene cut now resets through this flag
+    // instead of only through a disjoint frameID. The `reset`
+    // parameter the Rust side already passes is finally honoured.
+    // frameID stays a full uint64_t here (the old struct took a
+    // uint32_t cast); the title gives no camera matrices, so the
+    // vectors stay the same stand-ins as before (see the file
+    // header).
+    ffxDispatchDescFrameGenerationPrepareV2 prepare{};
+    prepare.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
+    prepare.frameID = frameID;
     prepare.flags = 0;
     prepare.commandList = commandList;
     prepare.renderSize = {fg->renderWidth, fg->renderHeight};
     prepare.jitterOffset = {jitterX, jitterY};
     prepare.motionVectorScale = {motionVectorScaleX, motionVectorScaleY};
     prepare.frameTimeDelta = frameTimeMs;
-    prepare.unused_reset = false;
+    prepare.reset = reset != 0;
     prepare.cameraNear = cameraNear;
     prepare.cameraFar = cameraFar;
     prepare.cameraFovAngleVertical = cameraFovAngleVertical;
     prepare.viewSpaceToMetersFactor = 1.0f;
     prepare.depth = apiResource(static_cast<ID3D12Resource *>(depth), depthState);
     prepare.motionVectors = apiResource(static_cast<ID3D12Resource *>(motionVectors), motionVectorState);
-
-    // The camera info is a linked struct after the prepare desc -
-    // a required input in FSR 3.1.4. The title gives no camera
-    // matrices (see the file header).
-    ffxDispatchDescFrameGenerationPrepareCameraInfo cameraInfo{};
-    cameraInfo.cameraPosition[0] = 0.0f;
-    cameraInfo.cameraPosition[1] = 0.0f;
-    cameraInfo.cameraPosition[2] = 0.0f;
-    cameraInfo.cameraUp[0] = 0.0f;
-    cameraInfo.cameraUp[1] = 1.0f;
-    cameraInfo.cameraUp[2] = 0.0f;
-    cameraInfo.cameraRight[0] = 1.0f;
-    cameraInfo.cameraRight[1] = 0.0f;
-    cameraInfo.cameraRight[2] = 0.0f;
-    cameraInfo.cameraForward[0] = 0.0f;
-    cameraInfo.cameraForward[1] = 0.0f;
-    cameraInfo.cameraForward[2] = -1.0f;
-    prepare.header.pNext = reinterpret_cast<decltype(prepare.header.pNext)>(
-        linkHeader(cameraInfo, FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_CAMERAINFO));
+    prepare.cameraPosition[0] = 0.0f;
+    prepare.cameraPosition[1] = 0.0f;
+    prepare.cameraPosition[2] = 0.0f;
+    prepare.cameraUp[0] = 0.0f;
+    prepare.cameraUp[1] = 1.0f;
+    prepare.cameraUp[2] = 0.0f;
+    prepare.cameraRight[0] = 1.0f;
+    prepare.cameraRight[1] = 0.0f;
+    prepare.cameraRight[2] = 0.0f;
+    prepare.cameraForward[0] = 0.0f;
+    prepare.cameraForward[1] = 0.0f;
+    prepare.cameraForward[2] = -1.0f;
 
     ffxReturnCode_t code = fg->api.dispatch(&fg->fgContext, &prepare.header);
     if (code == FFX_API_RETURN_OK) fg->lastFrameID = frameID;

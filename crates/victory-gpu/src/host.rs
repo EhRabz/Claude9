@@ -10127,23 +10127,80 @@ impl Host {
                     factory.CreateSwapChainForHwnd(&self.queue, hwnd, &desc, None, None)?.cast::<IDXGISwapChain3>()?
                 }
                 None => {
-                    let plain = factory
-                        .CreateSwapChainForHwnd(&self.queue, hwnd, &desc, None, None)?
-                        .cast::<IDXGISwapChain3>()?;
+                    // FSR 3 frame generation: the swap chain must be
+                    // NATIVE, not Streamline-proxied. The FSR DLL
+                    // rejects SL-proxied objects (its Wrap fails
+                    // code 3 on a proxied queue/chain), so when FSR
+                    // is serving, first try a chain made from the
+                    // device's own factory (created before Streamline
+                    // was initialised, so it is real, not the
+                    // interposer's) on the bridge's native queue.
+                    // If the Wrap takes it, that wrapped chain is
+                    // the swap chain. If the Wrap rejects it, drop
+                    // that chain and fall through to the plain chain
+                    // below — a native-queue chain presented through
+                    // the proxy queue would device-remove
+                    // (0x887A002B), so it must never be returned
+                    // unwrapped.
+                    let mut native_wrapped: Option<IDXGISwapChain3> = None;
                     if crate::fsr3::serving() {
-                        // FSR 3 frame generation: wrap the plain chain in
-                        // the frame-interpolation proxy. The render size
-                        // is the display size here — the first noted
-                        // upscaling has not run yet, and FSR 3 takes a
-                        // render at or below the context's maximum, so
-                        // this is safe; the context is remade on resize.
-                        // On any failure the plain chain is returned and
-                        // frame generation stays off.
-                        crate::fsr3::wrap_swapchain(plain, [width, height], [width, height], format)
-                    } else {
-                        // (`VICTORY_STREAMLINE_PRESENT=1`, DLSS without frame
-                        // generation: Streamline's proxy of it, for its present hook.)
-                        crate::streamline::present_hooked(plain)
+                        // The factory that enumerated the device's
+                        // adapter, before Streamline was initialised
+                        // — so it is the real factory, not the
+                        // interposer's. (A D3D12 device is not an
+                        // IDXGIDevice, so it cannot be cast to one
+                        // to reach the adapter; the stored adapter
+                        // is the way.)
+                        let native_factory = self
+                            .adapter
+                            .as_ref()
+                            .and_then(|a| a.GetParent::<IDXGIFactory2>().ok());
+                        if let (Some(native_factory), Some(native_queue)) =
+                            (native_factory, crate::fsr3::native_queue())
+                        {
+                            if let Ok(native_chain) = native_factory
+                                .CreateSwapChainForHwnd(
+                                    &native_queue, hwnd, &desc, None, None,
+                                )
+                                .and_then(|s| s.cast::<IDXGISwapChain3>())
+                            {
+                                let wrapped = crate::fsr3::wrap_swapchain(
+                                    native_chain,
+                                    [width, height],
+                                    [width, height],
+                                    format,
+                                );
+                                if crate::fsr3::swapchain_wrapped() {
+                                    native_wrapped = Some(wrapped);
+                                }
+                                // Else the Wrap rejected the native
+                                // chain: it is dropped here and the
+                                // plain chain below is used instead.
+                            }
+                        }
+                    }
+                    match native_wrapped {
+                        Some(wrapped) => wrapped,
+                        None => {
+                            let plain = factory
+                                .CreateSwapChainForHwnd(&self.queue, hwnd, &desc, None, None)?
+                                .cast::<IDXGISwapChain3>()?;
+                            if crate::fsr3::serving() {
+                                // FSR 3 frame generation: wrap the plain chain in
+                                // the frame-interpolation proxy. The render size
+                                // is the display size here — the first noted
+                                // upscaling has not run yet, and FSR 3 takes a
+                                // render at or below the context's maximum, so
+                                // this is safe; the context is remade on resize.
+                                // On any failure the plain chain is returned and
+                                // frame generation stays off.
+                                crate::fsr3::wrap_swapchain(plain, [width, height], [width, height], format)
+                            } else {
+                                // (`VICTORY_STREAMLINE_PRESENT=1`, DLSS without frame
+                                // generation: Streamline's proxy of it, for its present hook.)
+                                crate::streamline::present_hooked(plain)
+                            }
+                        }
                     }
                 }
             };

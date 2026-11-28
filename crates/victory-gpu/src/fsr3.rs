@@ -247,6 +247,15 @@ static FG_PER: AtomicU32 = AtomicU32::new(1);
 struct DeviceCtx {
     device: ID3D12Device,
     queue: ID3D12CommandQueue,
+    // A native direct queue made from the real device, for the FSR
+    // bridge and for creating a native swap chain. When Streamline
+    // serves, the queue victory hands over is a Streamline proxy
+    // queue, and the FSR DLL rejects SL-proxied objects (its Wrap
+    // fails code 3 on a proxied queue/chain). A native queue made
+    // here, from the real device, is what the bridge must be given.
+    // None when the native queue could not be made (falls back to
+    // the handed queue).
+    native_queue: Option<ID3D12CommandQueue>,
 }
 
 // SAFETY: D3D12 objects are free-threaded.
@@ -445,8 +454,36 @@ pub(crate) fn device_made(device: &ID3D12Device, queue: &ID3D12CommandQueue) -> 
     if BRIDGE.get().is_none() {
         return false;
     }
-    let _ = DEVICE.set(DeviceCtx { device: device.clone(), queue: queue.clone() });
+    // Make a NATIVE direct queue from the real device for the FSR
+    // bridge. When Streamline serves, `queue` is its proxy queue,
+    // and the FSR DLL rejects SL-proxied objects (Wrap fails code
+    // 3). A native queue made from the real device is what the
+    // bridge must be given. Falls back to the handed queue when a
+    // native queue cannot be made.
+    let native_queue: Option<ID3D12CommandQueue> = unsafe {
+        device
+            .CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
+                Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
+                ..Default::default()
+            })
+            .ok()
+    };
+    // The bridge is given the native queue when one was made, so
+    // the FG context is created against native objects throughout.
+    let bridge_queue = native_queue.as_ref().unwrap_or(queue);
+    let _ = DEVICE.set(DeviceCtx {
+        device: device.clone(),
+        queue: bridge_queue.clone(),
+        native_queue,
+    });
     true
+}
+
+/// The native direct queue made from the real device (see
+/// device_made), for creating a native swap chain in presenter().
+/// None when FSR 3 is not set up or no native queue could be made.
+pub(crate) fn native_queue() -> Option<ID3D12CommandQueue> {
+    DEVICE.get().and_then(|d| d.native_queue.clone())
 }
 
 /// Create the bridge's frame-generation context for `display` /
@@ -731,6 +768,15 @@ pub(crate) fn present_ends(_presenting: Option<Presenting>) {}
 /// interpolation proxy (the F1 menu asks).
 pub(crate) fn framegen_live() -> bool {
     FG_READY.load(Acquire) && SWAPCHAIN_WRAPPED.load(Acquire)
+}
+
+/// Whether the swap chain was wrapped by FSR 3 (set by
+/// wrap_swapchain on success). presenter() uses this to tell a
+/// successful wrap from a failed one, so it can discard a native
+/// chain the Wrap rejected instead of presenting it through the
+/// wrong queue.
+pub(crate) fn swapchain_wrapped() -> bool {
+    SWAPCHAIN_WRAPPED.load(Acquire)
 }
 
 /// Frames shown for each one rendered, as last asked: 2 with frame

@@ -6,6 +6,8 @@
 
 1. Download `victory.exe` from the
    [latest release](https://github.com/trustno1-coder/VIctory-NVIDIA/releases/latest).
+   (That binary is the upstream build, without FSR 3 frame generation; to get
+   FSR 3, build it yourself below.)
 2. Put it into the folder of **your own dump** of the title's Xbox Series
    build v1.0.2.1, next to `game_scarlett_master.exe`.
 3. Double-click it. Windows may say the publisher is unknown (the file is not
@@ -35,14 +37,19 @@ Install [Rust](https://rustup.rs) and the
 with "Desktop development with C++", then in PowerShell:
 
 ```powershell
-git clone https://github.com/trustno1-coder/VIctory-NVIDIA
-cd VIctory-NVIDIA
+git clone https://github.com/EhRabz/Claude9
+cd Claude9
+git checkout fsr3-framegen-3080ti
 .\Get-NVIDIA-DLSS.cmd
-powershell -ExecutionPolicy Bypass -File scripts\play-nvidia.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe'
+.\Get-FSR3.cmd
+powershell -ExecutionPolicy Bypass -File scripts\play-foxhound.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe' -Fsr3FrameGen
 ```
 
 Put the path to **your** `game_scarlett_master.exe` in the last line. The
-first start builds the layer, which takes a few minutes.
+first start builds the layer, which takes a few minutes. `Get-FSR3.cmd`
+fetches AMD's FSR 3 files (see
+[FSR 3 frame generation](#fsr-3-frame-generation)); leave off
+`-Fsr3FrameGen` to run the DLSS path instead.
 
 Options, requirements in full and the details are under
 [How to run it](#how-to-run-it).
@@ -234,11 +241,13 @@ Tools with "Desktop development with C++", and **your own dump** of the title's
 Xbox Series build v1.0.2.1 (the folder with `game_scarlett_master.exe`).
 
 ```powershell
-git clone https://github.com/trustno1-coder/VIctory-NVIDIA
-cd VIctory-NVIDIA
+git clone https://github.com/EhRabz/Claude9
+cd Claude9
+git checkout fsr3-framegen-3080ti
 copy victory.example.toml victory.toml      # then set game_dir to your dump's folder, outside this one
 .\Get-NVIDIA-DLSS.cmd                        # once: NVIDIA's DLSS and frame generation files, about 70 MB
-scripts\play-nvidia.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe'
+.\Get-FSR3.cmd                               # once: AMD's FSR 3 files, for frame generation on RTX 30-series
+scripts\play-foxhound.ps1 -Exe 'D:\Games\MyDump\game_scarlett_master.exe' -Fsr3FrameGen
 ```
 
 The first start builds the layer (a few minutes). `Get-NVIDIA-DLSS.cmd` gets
@@ -247,10 +256,11 @@ NVIDIA's files from
 `nvidia-sdk\` (git-ignored). They are NVIDIA's, under NVIDIA's licences, which
 are saved beside them; this repository does not carry them and may not. Nothing
 is downloaded unless you run that file; `VICTORY_STREAMLINE_DIR` names another
-folder if you have the Streamline SDK already.
+folder if you have the Streamline SDK already. `Get-FSR3.cmd` gets AMD's FSR 3
+files the same way (see [FSR 3 frame generation](#fsr-3-frame-generation));
+nothing is downloaded unless you run it either.
 
-`scripts\play-nvidia.ps1` is `scripts\play-foxhound.ps1` under the name this
-fork has always had; its options:
+`scripts\play-foxhound.ps1` runs the game; its options:
 
 | Option | What |
 |---|---|
