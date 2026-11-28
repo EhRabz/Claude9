@@ -10092,6 +10092,16 @@ impl Host {
                 BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 BufferCount: BUFFERS,
                 SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                // FSR 3 frame generation's swap-chain wrap needs the
+                // chain to be waitable: AMD's DLL sets the frame
+                // latency on it, and that fails without this flag
+                // (the wrap then fails with code 3). The flag must
+                // be set here, at creation; ResizeBuffers cannot
+                // add it later. (The desc's Flags field is a raw
+                // u32 in the windows crate, and the flag type wraps
+                // an i32, so the constant's value comes out with
+                // .0 as u32. Value is 64 = 0x40.)
+                Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
                 ..Default::default()
             };
             // With frame generation, through Streamline's factory proxy and
